@@ -36,14 +36,16 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       scanImage = File(pickedFile.path);
       textScanned = true;
       emit(
-          ImagePickedSuccess()); //rename state as you need if use this code for new project (dont forget make this state in states file)
+        ImagePickedSuccess(),
+      ); //rename state as you need if use this code for new project (dont forget make this state in states file)
       await getText(pickedFile.path);
     } else {
       print('No image selected.');
       textScanned = false;
       image = null;
       emit(
-          ImagePickedError()); //rename state as you need if use this code for new project (dont forget make this state in states file)
+        ImagePickedError(),
+      ); //rename state as you need if use this code for new project (dont forget make this state in states file)
       scannedText = 'eeeeeeeeeeerrrrrrrrrooooooorrrrrrrr';
     }
   }
@@ -57,13 +59,14 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   Future<void> getText(String imagePath) async {
     final inputImage = InputImage.fromFilePath(imagePath);
     final textRecognizer = TextRecognizer();
-    final RecognizedText recognizedText =
-        await textRecognizer.processImage(inputImage);
+    final RecognizedText recognizedText = await textRecognizer.processImage(
+      inputImage,
+    );
     await textRecognizer.close();
     scannedText = '';
     for (TextBlock block in recognizedText.blocks) {
       for (TextLine line in block.lines) {
-        scannedText = scannedText + line.text + "\n";
+        scannedText = "$scannedText${line.text}\n";
         print('shshshhsh${block.text}');
         print('shshshhsh${block.text.length}');
         final List<String> parts = block.text.split(' ');
@@ -72,20 +75,21 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         if (scanType == 'Mob') {
           if (firstPart.isNumeric()) {
             if (block.text.length == 21) {
-              print('donnnnne${block.text}');
               pin.text = block.text;
               emit(ScanPinSuccess());
             }
-            if (block.text.length == 13 || block.text.length == 14 ||block.text.length==12) {
+            if (block.text.length == 13 ||
+                block.text.length == 14 ||
+                block.text.length == 12) {
               serial.text = block.text;
             }
           }
-        }else{
+        } else {
           if (firstPart.isNumeric()) {
             print('shshshhsh${block.text}');
             print('shshshhshllllll${block.text.length}');
             print('bsbsbbsbsb${block.text.split('')}');
-            if ( block.text.length==17) {
+            if (block.text.length == 17) {
               print('donnnnne${block.text}');
               pin.text = block.text;
               emit(ScanPinSuccess());
@@ -116,20 +120,22 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       MapEntry('image', await MultipartFile.fromFile(image!.path)),
     );
     print(body);
-    DioHelper.post('scan', true, body: body, formData: formData).then((value) {
-      final data = value.data as Map<String, dynamic>;
-      print(data);
-      if (data['status'] == 1) {
-        showSnackBar('تم االارسال بنجاح');
-        emit(ScanSuccess());
-      } else {
-        showSnackBar('error');
-        emit(ScanError());
-      }
-    }).catchError((error) {
-      print(error.toString());
-      emit(ScanError());
-    });
+    DioHelper.post('scan', true, body: body, formData: formData)
+        .then((value) {
+          final data = value.data as Map<String, dynamic>;
+          print(data);
+          if (data['status'] == 1) {
+            showSnackBar('تم االارسال بنجاح');
+            emit(ScanSuccess());
+          } else {
+            showSnackBar('error');
+            emit(ScanError());
+          }
+        })
+        .catchError((error) {
+          print(error.toString());
+          emit(ScanError());
+        });
   }
 }
 
