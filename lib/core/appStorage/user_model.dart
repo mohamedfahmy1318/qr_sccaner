@@ -52,6 +52,8 @@ class User {
   String? createdAt;
   String? updatedAt;
   String? active;
+  String? width;
+  String? hight;
 
   User(
       {this.id,
@@ -61,18 +63,23 @@ class User {
         this.emailVerifiedAt,
         this.createdAt,
         this.updatedAt,
-        this.active});
+        this.active,
+        this.width,
+        this.hight});
 
-  User.fromJson(Map<String, dynamic> json) {
-    id = json['id'];
-    name = json['name'];
-    email = json['email'];
-    role = json['role'];
-    emailVerifiedAt = json['email_verified_at'];
-    createdAt = json['created_at'];
-    updatedAt = json['updated_at'];
-    active = json['active'];
-  }
+User.fromJson(Map<String, dynamic> json) {
+  id = json['id'];
+  name = json['name'];
+  email = json['email'];
+  role = json['role'];
+  emailVerifiedAt = json['email_verified_at'];
+  createdAt = json['created_at'];
+  updatedAt = json['updated_at'];
+  active = json['active'];
+  width = json['width'];
+  hight = json['hight'];
+}
+
 
   Map<String, dynamic> toJson() {
     final Map<String, dynamic> data = <String, dynamic>{};
@@ -80,10 +87,12 @@ class User {
     data['name'] = name;
     data['email'] = email;
     data['role'] = role;
-    data.putIfAbsent('email_verified_at', () => emailVerifiedAt);
+    data['email_verified_at'] = emailVerifiedAt;
     data['created_at'] = createdAt;
     data['updated_at'] = updatedAt;
     data['active'] = active;
+    data['width'] = width;
+    data['hight'] = hight;
     return data;
   }
 }

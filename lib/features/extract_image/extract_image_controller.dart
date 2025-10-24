@@ -123,7 +123,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     DioHelper.post('scan', true, body: body, formData: formData)
         .then((value) {
           final data = value.data as Map<String, dynamic>;
-          print(data);
           if (data['status'] == 1) {
             showSnackBar('تم االارسال بنجاح');
             emit(ScanSuccess());

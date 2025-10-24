@@ -97,6 +97,11 @@ class ExtractImageView extends StatelessWidget {
                       Container(
                         width: MediaQuery.of(context).size.width,
                         height: MediaQuery.of(context).size.height * 0.28,
+                        decoration: BoxDecoration(
+                          border:
+                              Border.all(color: Colors.blueAccent, width: 1.0),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
                         child: ExtractImageController.of(context).image != null
                             ? Image.file(
                                 ExtractImageController.of(context).image!)
@@ -111,11 +116,6 @@ class ExtractImageView extends StatelessWidget {
                                       height: 50,
                                       width: 50),
                                 )),
-                        decoration: BoxDecoration(
-                          border:
-                              Border.all(color: Colors.blueAccent, width: 1.0),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
                       ),
                       const SizedBox(
                         height: 30.0,
@@ -225,9 +225,15 @@ class ExtractImageView extends StatelessWidget {
                       ),
                       BlocBuilder<ExtractImageController, ExtractImageStates>(
                         builder: (context, state) => state is ScanLoading
-                            ? CircularProgressIndicator(
-                                color: colorPrimary,
-                              )
+                            ? SizedBox(
+                                height: 35,
+                                width: 35,
+                                child: Center(
+                                  child: CircularProgressIndicator(
+                                    color: colorPrimary,
+                                  ),
+                                ),
+                            )
                             : CustomButton(
                                 text: 'Save',
                                 onPress: () async {

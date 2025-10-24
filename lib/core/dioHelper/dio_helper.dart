@@ -4,7 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:qrscanner/core/appStorage/app_storage.dart';
 
 class DioHelper {
-  static const _baseUrl = 'https://scanner.elhsnaaa-eg.com/api/v1/';
+  static const _baseUrl = 'https://bestscan.store/api/v1/';
 
   static Dio dioSingleton = Dio()..options.baseUrl = _baseUrl;
 

@@ -3,8 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:qrscanner/core/router/router.dart';
 import 'package:qrscanner/features/card_scanner/card_scanner_view.dart';
-import 'package:qrscanner/features/card_type/card_type_view.dart';
 import 'package:qrscanner/features/login/login_view.dart';
+
 
 class MyHttpOverrides extends HttpOverrides {
   @override
@@ -27,7 +27,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: const CardScannerView(),
+      home: const LogInView(),
       onGenerateRoute: onGenerateRoute,
       debugShowCheckedModeBanner: false,
       navigatorKey: navigatorKey,

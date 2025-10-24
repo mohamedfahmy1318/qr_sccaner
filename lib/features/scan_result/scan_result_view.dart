@@ -6,7 +6,7 @@ import 'package:qrscanner/common_component/custom_text_field.dart';
 import 'package:qrscanner/constant.dart';
 
 class ScanResultView extends StatelessWidget {
-  const ScanResultView({Key? key}) : super(key: key);
+  const ScanResultView({super.key});
 
   @override
   Widget build(BuildContext context) {
