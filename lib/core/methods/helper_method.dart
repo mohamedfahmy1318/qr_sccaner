@@ -1,5 +1,5 @@
 // لازم تكون top-level function علشان تشتغل مع compute
-import 'dart:io';
+/*import 'dart:io';
 import 'package:image/image.dart' as img;
 
 class PreprocessResult {
@@ -41,3 +41,4 @@ PreprocessResult cropAndEnhance(CropAndEnhanceParams params) {
   File(outPath).writeAsBytesSync(outBytes);
   return PreprocessResult(outPath);
 }
+*/

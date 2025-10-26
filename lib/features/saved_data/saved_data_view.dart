@@ -23,15 +23,14 @@ class SavedDataView extends StatelessWidget {
           decoration: containerDecoration,
           child: ListView(
             children: [
-              const CustomAppBar(
-                text: 'Saved Data',
-              ),
+              const CustomAppBar(text: 'Saved Data'),
               Container(
                 height: MediaQuery.of(context).size.height,
                 padding: EdgeInsets.only(
-                    top: MediaQuery.of(context).size.height * 0.06,
-                    left: 20,
-                    right: 20),
+                  top: MediaQuery.of(context).size.height * 0.06,
+                  left: 20,
+                  right: 20,
+                ),
                 decoration: const BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.only(
@@ -46,9 +45,7 @@ class SavedDataView extends StatelessWidget {
 
                     if (state is SavedDataLoading ||
                         (state is SavedDataInit && scans.isEmpty)) {
-                      return const Center(
-                        child: CircularProgressIndicator(),
-                      );
+                      return const Center(child: CircularProgressIndicator());
                     }
 
                     if (state is SavedDataError) {
@@ -56,7 +53,8 @@ class SavedDataView extends StatelessWidget {
                         child: Padding(
                           padding: EdgeInsets.symmetric(vertical: 40),
                           child: CustomText(
-                            text: 'Unable to load saved scans. Please try again later.',
+                            text:
+                                'Unable to load saved scans. Please try again later.',
                             color: Colors.black,
                             fontSize: 16,
                             fontWeight: FontWeight.w500,
@@ -89,7 +87,9 @@ class SavedDataView extends StatelessWidget {
                             borderRadius: BorderRadius.circular(12),
                           ),
                           padding: const EdgeInsets.symmetric(
-                              vertical: 20, horizontal: 10),
+                            vertical: 20,
+                            horizontal: 10,
+                          ),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
@@ -105,37 +105,32 @@ class SavedDataView extends StatelessWidget {
                                     fontSize: 12,
                                     widthButton:
                                         MediaQuery.of(context).size.width *
-                                            0.25,
+                                        0.25,
                                   ),
-                                  const SizedBox(
-                                    width: 5,
-                                  ),
+                                  const SizedBox(width: 5),
                                   CustomButton(
                                     text: 'Send Email',
                                     fontSize: 12,
                                     widthButton:
                                         MediaQuery.of(context).size.width *
-                                            0.25,
+                                        0.25,
                                   ),
                                 ],
-                              )
+                              ),
                             ],
                           ),
                         ),
                         const Padding(
                           padding: EdgeInsets.symmetric(vertical: 20),
-                          child: CustomTextField(
-                            hint: 'Search....',
-                          ),
+                          child: CustomTextField(hint: 'Search....'),
                         ),
                         ListView.builder(
                           shrinkWrap: true,
-                          physics: const ScrollPhysics(),
+                          physics: const BouncingScrollPhysics(),
                           itemCount: scans.length,
-                          itemBuilder: (context, index) => SavedDataCard(
-                            savedData: scans[index],
-                          ),
-                        )
+                          itemBuilder: (context, index) =>
+                              SavedDataCard(savedData: scans[index]),
+                        ),
                       ],
                     );
                   },

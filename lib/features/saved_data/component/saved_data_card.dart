@@ -2,28 +2,27 @@ import 'package:flutter/material.dart';
 import 'package:qrscanner/common_component/custom_text.dart';
 import 'package:qrscanner/core/appStorage/my_scans_model.dart';
 
-
 class SavedDataCard extends StatelessWidget {
-  SavedDataCard({Key? key,this.savedData}) : super(key: key);
+  SavedDataCard({super.key, this.savedData});
   SavedData? savedData;
 
   @override
   Widget build(BuildContext context) {
     return Card(
       shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: const BorderSide(color: Colors.grey)
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: Colors.grey),
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 20,horizontal: 20),
+        padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 20),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children:  [
+          children: [
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
-                  children:  [
+                  children: [
                     const CustomText(
                       text: 'Pin : ',
                       color: Colors.grey,
@@ -37,14 +36,14 @@ class SavedDataCard extends StatelessWidget {
                   ],
                 ),
                 Row(
-                  children:  [
+                  children: [
                     const CustomText(
                       text: 'Serial : ',
                       color: Colors.grey,
                       fontSize: 16,
                     ),
                     CustomText(
-                      text:  savedData!.serial!,
+                      text: savedData!.serial!,
                       color: Colors.grey,
                       fontSize: 16,
                     ),
@@ -52,7 +51,7 @@ class SavedDataCard extends StatelessWidget {
                 ),
               ],
             ),
-            Image.asset('assets/images/edit.png')
+            Image.asset('assets/images/edit.png'),
           ],
         ),
       ),
