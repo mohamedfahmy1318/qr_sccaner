@@ -8,7 +8,6 @@
     
     <!-- Permission for internet (if needed for ML Kit) -->
     <uses-permission android:name="android.permission.INTERNET"/>
-    
     <application
         android:label="qrscanner"
         android:name="${applicationName}"

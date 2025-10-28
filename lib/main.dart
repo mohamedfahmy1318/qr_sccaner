@@ -2,9 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:qrscanner/core/router/router.dart';
-import 'package:qrscanner/features/card_scanner/card_scanner_view.dart';
 import 'package:qrscanner/features/login/login_view.dart';
-
 
 class MyHttpOverrides extends HttpOverrides {
   @override
