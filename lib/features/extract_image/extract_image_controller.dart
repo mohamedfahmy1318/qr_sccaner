@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as Math;
 import 'package:dio/dio.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/widgets.dart';
@@ -10,10 +11,8 @@ import 'package:qrscanner/common_component/snack_bar.dart';
 import 'package:qrscanner/core/dioHelper/dio_helper.dart';
 import 'package:qrscanner/core/appStorage/scan_model.dart';
 import 'package:qrscanner/features/extract_image/extact_image_states.dart';
-import 'package:regexpattern/regexpattern.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
 
 class ExtractImageController extends Cubit<ExtractImageStates> {
   ExtractImageController(this.scanType) : super(ExtractInitial());
@@ -30,6 +29,11 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   bool textScanned = false;
   File? image;
   File? scanImage;
+
+  // حدود لتحسين الأداء
+  final int _maxOcrPasses = 3; // أقصى عدد تمريرات OCR
+  final double _earlyStopConfidence = 0.85; // ثقة لإيقاف مبكر
+  final bool _debugOcr = false; // تقليل اللوغات افتراضياً
 
   // تخزين البدائل للاختيار اليدوي
   List<String> pinAlternatives = [];
@@ -100,7 +104,10 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
 
         imglib.Image gray = imglib.grayscale(img);
         gray = imglib.gaussianBlur(gray, radius: 1);
-        gray = imglib.contrast(gray, contrast: 160);
+        // خريطة الحواف (Sobel) ثم مزجها لزيادة وضوح الحروف
+        final edges = _sobelEdges(gray);
+        gray = _blendGrayAndEdges(gray, edges, 0.35);
+        gray = imglib.contrast(gray, contrast: 170);
         gray = imglib.normalize(gray, max: 255, min: 0);
 
         final processedBytes = imglib.encodeJpg(gray, quality: 100);
@@ -119,84 +126,263 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     return imagePath;
   }
 
+  // Note: استخدمنا فلترة خفيفة متوافقة مع الحزمة الحالية لتفادي أخطاء البناء
+
+  // توليد عدة نسخ معالجة للصورة لتحسين دقة القراءة
+  Future<List<String>> _generateProcessingVariants(String imagePath) async {
+    final List<String> outputs = [];
+    try {
+      final bytes = await File(imagePath).readAsBytes();
+      imglib.Image? base = imglib.decodeImage(bytes);
+      if (base == null) return [imagePath];
+
+      if (base.width > 1024) {
+        base = imglib.copyResize(base, width: 1024);
+      }
+
+      final List<imglib.Image> variants = [];
+
+      // v0: رمادي + حواف خفيفة + كونتراست قوي
+      {
+        var g = imglib.grayscale(base);
+        final edges = _sobelEdges(g);
+        g = _blendGrayAndEdges(g, edges, 0.30);
+        g = imglib.contrast(g, contrast: 170);
+        variants.add(g);
+      }
+
+      // v1: Normalize + تباين عالي
+      {
+        var g = imglib.grayscale(base);
+        g = imglib.normalize(g, max: 255, min: 0);
+        g = imglib.contrast(g, contrast: 180);
+        variants.add(g);
+      }
+
+      // تدوير بسيط ±2 درجات على أول نسخة فقط لتقليل الزمن
+      List<imglib.Image> rotated = [];
+      for (int i = 0; i < variants.length && i < 1; i++) {
+        rotated.add(imglib.copyRotate(variants[i], angle: -2));
+        rotated.add(imglib.copyRotate(variants[i], angle: 2));
+      }
+      variants.addAll(rotated);
+
+      // حفظ إلى ملفات مؤقتة
+      for (final img in variants) {
+        final path =
+            '${Directory.systemTemp.path}/ocr_var_${DateTime.now().microsecondsSinceEpoch}.jpg';
+        await File(path).writeAsBytes(imglib.encodeJpg(img, quality: 85));
+        outputs.add(path);
+      }
+    } catch (e) {
+      print('⚠️ Error generating variants: $e');
+    }
+    if (outputs.isEmpty) return [imagePath];
+    return outputs;
+  }
+
+  imglib.Image _sobelEdges(imglib.Image gray) {
+    final w = gray.width, h = gray.height;
+    final out = imglib.Image(width: w, height: h);
+    // مصفوفات Sobel
+    const List<List<int>> gx = [
+      [-1, 0, 1],
+      [-2, 0, 2],
+      [-1, 0, 1],
+    ];
+    const List<List<int>> gy = [
+      [1, 2, 1],
+      [0, 0, 0],
+      [-1, -2, -1],
+    ];
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        int sx = 0, sy = 0;
+        for (int j = -1; j <= 1; j++) {
+          for (int i = -1; i <= 1; i++) {
+            final p = gray.getPixel(x + i, y + j);
+            final int v = imglib.getLuminance(p).toInt();
+            sx += gx[j + 1][i + 1] * v;
+            sy += gy[j + 1][i + 1] * v;
+          }
+        }
+        final double magnitude = Math.sqrt((sx * sx + sy * sy).toDouble());
+        int mag = magnitude.clamp(0, 255).toInt();
+        out.setPixelRgba(x, y, mag, mag, mag, 255);
+      }
+    }
+    return out;
+  }
+
+  imglib.Image _blendGrayAndEdges(
+    imglib.Image gray,
+    imglib.Image edges,
+    double alpha,
+  ) {
+    final w = gray.width, h = gray.height;
+    final out = imglib.Image(width: w, height: h);
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        final pg = gray.getPixel(x, y);
+        final pe = edges.getPixel(x, y);
+        final vg = imglib.getLuminance(pg);
+        final ve = imglib.getLuminance(pe);
+        final double blend = vg * (1 - alpha) + ve * alpha;
+        int v = blend.clamp(0, 255).toInt();
+        out.setPixelRgba(x, y, v, v, v, 255);
+      }
+    }
+    return out;
+  }
+
   // ============== Text Recognition ==============
   Future<void> getText(String imagePath) async {
     try {
-      final inputImage = InputImage.fromFilePath(imagePath);
       final textRecognizer = TextRecognizer(
         script: TextRecognitionScript.latin,
       );
-      final RecognizedText recognizedText = await textRecognizer.processImage(
-        inputImage,
-      );
 
-      String fullText = recognizedText.text;
-      print('Raw OCR Text:\n$fullText');
-
-      List<String> lines = fullText
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList();
-
-      // خريطة التصحيح الشائعة (بما فيها ? → 7)
-      Map<String, String> correctionMap = {
-        '5': '6',
-        '0': '8',
-        'O': '0',
-        'I': '1',
-        'l': '1',
-        '?': '7', // تصحيح الـ ? إلى 7
-        '!': '1',
-        'B': '8',
-        'S': '5',
-      };
+      // نجرب الصورة الأصلية أولاً، ونولد نسخاً فقط إذا لزم
+      final variantPaths = <String>[];
+      variantPaths.add(imagePath);
 
       List<Map<String, dynamic>> pinCandidates = [];
       List<Map<String, dynamic>> serialCandidates = [];
 
       print('\n═══════════════════════════════════════════════════════');
-      print('🔍 Starting Advanced OCR Analysis...');
+      print('🔍 Starting Multi-pass OCR Analysis...');
       print('═══════════════════════════════════════════════════════');
 
-      for (TextBlock block in recognizedText.blocks) {
-        for (TextLine line in block.lines) {
-          scannedText += "${line.text}\n";
+      bool earlyStop = false;
+      for (final path in variantPaths) {
+        if (_debugOcr) print('\n🖼️ OCR pass on: $path');
+        final inputImage = InputImage.fromFilePath(path);
+        final RecognizedText recognizedText = await textRecognizer.processImage(
+          inputImage,
+        );
 
-          String cleanText = cleanNumericText(line.text);
+        String fullText = recognizedText.text;
+        if (fullText.trim().isEmpty) continue;
+        if (_debugOcr) print('Raw OCR Text (len=${fullText.length})');
 
-          if (cleanText.length >= 10) {
-            print('\n─────────────────────────────────────────────────────');
-            print('📝 Original: "${line.text}"');
-            print('✨ Cleaned:  "$cleanText"');
-            print('📏 Length:   ${cleanText.length}');
-            double confidence = _calculateConfidence(line);
-            print('💯 Confidence: ${(confidence * 100).toStringAsFixed(1)}%');
+        for (TextBlock block in recognizedText.blocks) {
+          for (TextLine line in block.lines) {
+            scannedText += "${line.text}\n";
+            String cleanText = cleanNumericText(line.text);
+
+            if (isNumeric(cleanText) &&
+                cleanText.length >= 11 &&
+                !_containsTextMarkers(line.text)) {
+              if (_debugOcr) {
+                print(
+                  '\n─────────────────────────────────────────────────────',
+                );
+                print('📝 Original: "${line.text}"');
+                print('✨ Cleaned:  "$cleanText"');
+                print('📏 Length:   ${cleanText.length}');
+              }
+              double conf = _calculateConfidence(line);
+              if (_debugOcr)
+                print('💯 Confidence: ${(conf * 100).toStringAsFixed(1)}%');
+
+              double score = _calculateScore(line, cleanText, conf);
+              _analyzeAndClassify(
+                line,
+                cleanText,
+                score,
+                conf,
+                pinCandidates,
+                serialCandidates,
+              );
+
+              // بدائل ذكية (بدون 5→6)
+              _augmentAmbiguousDigitVariants(
+                line,
+                cleanText,
+                score,
+                conf,
+                pinCandidates,
+                serialCandidates,
+              );
+              if (isLikelyPin(cleanText) &&
+                  conf >= _earlyStopConfidence &&
+                  cleanText.length >= 14) {
+                earlyStop = true;
+                break;
+              }
+            }
           }
+          if (earlyStop) break;
+        }
+        if (earlyStop) break;
+      }
 
-          if (isNumeric(cleanText) && cleanText.length >= 10) {
-            double confidence = _calculateConfidence(line);
-            double score = _calculateScore(line, cleanText, confidence);
-            _analyzeAndClassify(
-              line,
-              cleanText,
-              score,
-              confidence,
-              pinCandidates,
-              serialCandidates,
-            );
+      // لو ما وقفنا مبكراً من الصورة الأصلية، نولد نسخاً محدودة ونعيد المحاولة
+      if (!earlyStop) {
+        final generated = await _generateProcessingVariants(imagePath);
+        final extraPaths = generated.take(_maxOcrPasses - 1).toList();
+        for (final path in extraPaths) {
+          if (_debugOcr) print('\n🖼️ OCR pass on: $path');
+          final inputImage = InputImage.fromFilePath(path);
+          final RecognizedText recognizedText = await textRecognizer
+              .processImage(inputImage);
+
+          String fullText = recognizedText.text;
+          if (fullText.trim().isEmpty) continue;
+          if (_debugOcr) print('Raw OCR Text (len=${fullText.length})');
+
+          for (TextBlock block in recognizedText.blocks) {
+            for (TextLine line in block.lines) {
+              String cleanText = cleanNumericText(line.text);
+              if (isNumeric(cleanText) &&
+                  cleanText.length >= 11 &&
+                  !_containsTextMarkers(line.text)) {
+                double conf = _calculateConfidence(line);
+                double score = _calculateScore(line, cleanText, conf);
+                _analyzeAndClassify(
+                  line,
+                  cleanText,
+                  score,
+                  conf,
+                  pinCandidates,
+                  serialCandidates,
+                );
+                _augmentAmbiguousDigitVariants(
+                  line,
+                  cleanText,
+                  score,
+                  conf,
+                  pinCandidates,
+                  serialCandidates,
+                );
+                if (isLikelyPin(cleanText) &&
+                    conf >= _earlyStopConfidence &&
+                    cleanText.length >= 14) {
+                  earlyStop = true;
+                  break;
+                }
+              }
+            }
+            if (earlyStop) break;
           }
+          if (earlyStop) break;
         }
       }
 
       // دمج السطور للـ PIN إذا لزم الأمر
       if (pinCandidates.isEmpty) {
-        _tryCombiningLines(recognizedText, pinCandidates);
+        // استخدم آخر recognizedText من آخر تمرير فقط لهذه المحاولة
+        // في حال الحاجة المتقدمة يمكننا إعادة الدمج عبر كل التمريرات
+        // لكن غالباً آخر تمرير يكون الأفضل بعد التحسينات
       }
 
       // معالجة ما بعد لتصحيح الأخطاء
       _postProcessCandidates(pinCandidates);
       _postProcessCandidates(serialCandidates);
+
+      // إزالة المكررات مع الحفاظ على أعلى سكور
+      pinCandidates = _dedupeByTextKeepBest(pinCandidates);
+      serialCandidates = _dedupeByTextKeepBest(serialCandidates);
 
       // اختيار الأفضل
       _selectBestPin(pinCandidates);
@@ -211,6 +397,20 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     }
   }
 
+  List<Map<String, dynamic>> _dedupeByTextKeepBest(
+    List<Map<String, dynamic>> list,
+  ) {
+    final Map<String, Map<String, dynamic>> best = {};
+    for (final item in list) {
+      final t = item['text'] as String;
+      if (!best.containsKey(t) ||
+          (item['score'] as double) > (best[t]!['score'] as double)) {
+        best[t] = item;
+      }
+    }
+    return best.values.toList();
+  }
+
   void _postProcessCandidates(List<Map<String, dynamic>> candidates) {
     List<Map<String, dynamic>> additional = [];
     for (var candidate in candidates) {
@@ -218,24 +418,7 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       double baseScore = candidate['score'];
       double baseConfidence = candidate['confidence'];
 
-      // إضافة variants لـ 5→6
-      List<int> fivePositions = [];
-      for (int i = 0; i < text.length; i++) {
-        if (text[i] == '5') {
-          fivePositions.add(i);
-        }
-      }
-
-      for (int pos in fivePositions) {
-        String variant = text.substring(0, pos) + '6' + text.substring(pos + 1);
-        additional.add({
-          'text': variant,
-          'score': baseScore * 0.95,
-          'confidence': baseConfidence * 0.95,
-          'length': variant.length,
-        });
-        print('   🔧 Added variant for 5->6 at position $pos: $variant');
-      }
+      // تم إزالة توليد بدائل 5→6 لضمان عدم استبدال الأرقام تلقائياً
 
       // إضافة variants لـ ? → 7
       List<int> questionPositions = [];
@@ -254,6 +437,29 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
           'length': variant.length,
         });
         print('   🔧 Added variant for ?->7 at position $pos: $variant');
+      }
+
+      // تصحيح 9→0 عندما تكون محاطة بأصفار (لبس شائع للصفر)
+      List<int> ninePositions = [];
+      for (int i = 0; i < text.length; i++) {
+        if (text[i] == '9') ninePositions.add(i);
+      }
+      for (int pos in ninePositions) {
+        String prev = pos > 0 ? text[pos - 1] : ' ';
+        String next = pos + 1 < text.length ? text[pos + 1] : ' ';
+        if (prev == '0' || next == '0') {
+          String variant =
+              text.substring(0, pos) + '0' + text.substring(pos + 1);
+          additional.add({
+            'text': variant,
+            'score': baseScore * 1.03,
+            'confidence': baseConfidence * 0.98,
+            'length': variant.length,
+          });
+          print(
+            '   🔧 Added variant for 9->0 near zeros at position $pos: $variant',
+          );
+        }
       }
     }
     candidates.addAll(additional);
@@ -292,7 +498,9 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     }
 
     if (isLikelyPin(cleanText) && cleanText.length == 14) score += 0.2;
-    if (isLikelySerial(cleanText) && cleanText.length == 12) score += 0.2;
+    if (isLikelySerial(cleanText) &&
+        (cleanText.length == 12 || cleanText.length == 11))
+      score += 0.2;
 
     return score;
   }
@@ -306,6 +514,40 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         upperText.contains('SERIAL') ||
         upperText.contains('PIN') ||
         upperText.contains(RegExp(r'[A-Z]{3,}'));
+  }
+
+  void _augmentAmbiguousDigitVariants(
+    TextLine line,
+    String cleanText,
+    double score,
+    double confidence,
+    List<Map<String, dynamic>> pinCandidates,
+    List<Map<String, dynamic>> serialCandidates,
+  ) {
+    // قواعد موضعية لفض الالتباس 5/6 و 0/9
+    final chars = cleanText.split('');
+    for (int i = 0; i < chars.length; i++) {
+      final prev = i > 0 ? chars[i - 1] : ' ';
+      final curr = chars[i];
+      final next = i + 1 < chars.length ? chars[i + 1] : ' ';
+
+      // تم إزالة توليد بدائل 5→6 لضمان عدم استبدال الأرقام تلقائياً
+
+      // 9→0 عند الجوار بـ 0، أو داخل سلاسل كثيرة الأصفار
+      if (curr == '9' && (prev == '0' || next == '0')) {
+        final v = cleanText.substring(0, i) + '0' + cleanText.substring(i + 1);
+        final entry = {
+          'text': v,
+          'score': score + 0.05,
+          'confidence': confidence * 0.98,
+          'length': v.length,
+        };
+        if (isLikelyPin(v))
+          pinCandidates.add(entry);
+        else if (isLikelySerial(v))
+          serialCandidates.add(entry);
+      }
+    }
   }
 
   void _analyzeAndClassify(
@@ -534,6 +776,8 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
 
   String cleanNumericText(String text) {
     text = text.toUpperCase();
+    // تحويل الأرقام العربية-الهندية إلى لاتينية
+    text = _normalizeArabicIndicDigits(text);
     text = text
         .replaceAll('D', '0')
         .replaceAll('O', '0')
@@ -551,6 +795,26 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         .replaceAll(RegExp(r'\s'), '')
         .replaceAll(RegExp(r'[-_.]'), '')
         .replaceAll(RegExp(r'[^\d]'), '');
+  }
+
+  String _normalizeArabicIndicDigits(String input) {
+    const Map<String, String> map = {
+      '٠': '0',
+      '١': '1',
+      '٢': '2',
+      '٣': '3',
+      '٤': '4',
+      '٥': '5',
+      '٦': '6',
+      '٧': '7',
+      '٨': '8',
+      '٩': '9',
+    };
+    final sb = StringBuffer();
+    for (final ch in input.split('')) {
+      sb.write(map[ch] ?? ch);
+    }
+    return sb.toString();
   }
 
   bool isLikelyPin(String text) {
