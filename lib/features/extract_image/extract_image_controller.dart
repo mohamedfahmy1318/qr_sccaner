@@ -7,12 +7,14 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_doc_scanner/flutter_doc_scanner.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as imglib;
+import 'package:opencv_dart/opencv.dart' as cv;
 import 'package:qrscanner/common_component/snack_bar.dart';
 import 'package:qrscanner/core/dioHelper/dio_helper.dart';
 import 'package:qrscanner/core/appStorage/scan_model.dart';
 import 'package:qrscanner/features/extract_image/extact_image_states.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
+import 'dart:typed_data';
 
 class ExtractImageController extends Cubit<ExtractImageStates> {
   ExtractImageController(this.scanType) : super(ExtractInitial());
@@ -31,9 +33,45 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   File? scanImage;
 
   // حدود لتحسين الأداء
-  final int _maxOcrPasses = 3; // أقصى عدد تمريرات OCR
-  final double _earlyStopConfidence = 0.85; // ثقة لإيقاف مبكر
+  final int _maxOcrPasses = 2; // أقصى عدد تمريرات OCR (تقليل للتسريع)
+  final double _earlyStopConfidence =
+      0.82; // ثقة لإيقاف مبكر (رفع بسيط لزيادة الدقة)
   final bool _debugOcr = false; // تقليل اللوغات افتراضياً
+
+  // كاش لقوالب الأرقام كمصفوفات Mat جاهزة (لتفادي I/O والتكرار)
+  Map<String, List<String>> _templatePaths = {
+    '0': ['assets/digit_templates/template_0.jpeg'],
+    '3': ['assets/digit_templates/template_3.jpeg'],
+    '5': ['assets/digit_templates/template_5.jpeg'],
+    '6': [
+      'assets/digit_templates/template_6.jpeg',
+      'assets/digit_templates/template_6_A.jpeg',
+      'assets/digit_templates/template_6_B.jpeg',
+      'assets/digit_templates/template_6_C.jpeg',
+    ],
+    '8': ['assets/digit_templates/template_8.jpeg'],
+    '9': ['assets/digit_templates/template_9.jpeg'],
+  };
+  final Map<String, List<dynamic>> _templateMatsCache = {}; // key -> List<Mat>
+  bool _templatesLoaded = false;
+
+  Future<void> _ensureTemplatesLoaded() async {
+    if (_templatesLoaded) return;
+    for (final entry in _templatePaths.entries) {
+      final list = <dynamic>[]; // Mat
+      for (final path in entry.value) {
+        try {
+          if (await File(path).exists()) {
+            final bytes = await File(path).readAsBytes();
+            final mat = cv.imdecode(bytes, 0); // gray
+            list.add(mat);
+          }
+        } catch (_) {}
+      }
+      if (list.isNotEmpty) _templateMatsCache[entry.key] = list;
+    }
+    _templatesLoaded = true;
+  }
 
   // تخزين البدائل للاختيار اليدوي
   List<String> pinAlternatives = [];
@@ -134,6 +172,7 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     try {
       final bytes = await File(imagePath).readAsBytes();
       imglib.Image? base = imglib.decodeImage(bytes);
+
       if (base == null) return [imagePath];
 
       if (base.width > 1024) {
@@ -179,6 +218,59 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     }
     if (outputs.isEmpty) return [imagePath];
     return outputs;
+  }
+
+  Future<List<String>> _enhanceAndReOcrSixes(
+    String originalImagePath,
+    List<TextBlock> blocks,
+    TextRecognizer textRecognizer,
+  ) async {
+    final List<String> results = [];
+    final bytes = await File(originalImagePath).readAsBytes();
+    imglib.Image? base = imglib.decodeImage(bytes);
+    int ix = 0;
+    for (final block in blocks) {
+      for (final line in block.lines) {
+        for (final element in line.elements) {
+          final txt = element.text.trim();
+          if (txt == '6' || txt == '8' || txt == '0' || txt == '5') {
+            final rect = element.boundingBox;
+            if (rect != null) {
+              int x = (rect.left - 8).toInt();
+              int y = (rect.top - 8).toInt();
+              int w = (rect.width + 16).toInt();
+              int h = (rect.height + 16).toInt();
+              x = x.clamp(0, base!.width - 1);
+              y = y.clamp(0, base.height - 1);
+              if (x + w > base.width) w = base.width - x;
+              if (y + h > base.height) h = base.height - y;
+              final crop = imglib.copyCrop(
+                base,
+                x: x,
+                y: y,
+                width: w,
+                height: h,
+              );
+              final enhanced = imglib.contrast(crop!, contrast: 290);
+              final tempPath =
+                  '${Directory.systemTemp.path}/ocr_digit_${txt}_${DateTime.now().microsecondsSinceEpoch}_$ix.jpg';
+              await File(
+                tempPath,
+              ).writeAsBytes(imglib.encodeJpg(enhanced, quality: 95));
+
+              // إجراء template matching
+              final digitBytes = await File(tempPath).readAsBytes();
+              final bestDigit = await matchDigitWithTemplates(digitBytes);
+              print('Digit ($txt) matched as: $bestDigit');
+              // يمكن تخزين النتيجة أو استخدامها لاحقاً هنا أو عند التصحيح
+              results.add(tempPath);
+              ix++;
+            }
+          }
+        }
+      }
+    }
+    return results;
   }
 
   imglib.Image _sobelEdges(imglib.Image gray) {
@@ -235,6 +327,19 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     return out;
   }
 
+  // ============== Manual Threshold ==============
+  imglib.Image manualThreshold(imglib.Image gray, int thresh) {
+    for (int y = 0; y < gray.height; y++) {
+      for (int x = 0; x < gray.width; x++) {
+        final color = gray.getPixel(x, y);
+        final l = imglib.getLuminance(color).toInt();
+        final v = l > thresh ? 255 : 0;
+        gray.setPixelRgba(x, y, v, v, v, 255);
+      }
+    }
+    return gray;
+  }
+
   // ============== Text Recognition ==============
   Future<void> getText(String imagePath) async {
     try {
@@ -242,9 +347,39 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         script: TextRecognitionScript.latin,
       );
 
-      // نجرب الصورة الأصلية أولاً، ونولد نسخاً فقط إذا لزم
-      final variantPaths = <String>[];
-      variantPaths.add(imagePath);
+      // توليد نسخ معالجة متنوعة للصورة الكاملة
+      final originalBytes = await File(imagePath).readAsBytes();
+      imglib.Image? img = imglib.decodeImage(originalBytes);
+      final List<String> variantPaths = [];
+      if (img != null) {
+        // النسخة 1: contrast قوي
+        final img1 = imglib.contrast(img.clone(), contrast: 220);
+        final path1 =
+            '${Directory.systemTemp.path}/pre_contrast_${DateTime.now().microsecondsSinceEpoch}.jpg';
+        await File(path1).writeAsBytes(imglib.encodeJpg(img1, quality: 95));
+        variantPaths.add(path1);
+        // النسخة 2: normalize + contrast
+        final img2 = imglib.normalize(img.clone(), max: 255, min: 0);
+        final c2 = imglib.contrast(img2, contrast: 230);
+        final path2 =
+            '${Directory.systemTemp.path}/pre_norm_contrast_${DateTime.now().microsecondsSinceEpoch}.jpg';
+        await File(path2).writeAsBytes(imglib.encodeJpg(c2, quality: 95));
+        variantPaths.add(path2);
+        // النسخة 3: Gaussian blur خفيف + contrast متوسط
+        var gaussian = imglib.gaussianBlur(img.clone(), radius: 1);
+        gaussian = imglib.contrast(gaussian, contrast: 180);
+        final path3 =
+            '${Directory.systemTemp.path}/pre_blur_contrast_${DateTime.now().microsecondsSinceEpoch}.jpg';
+        await File(path3).writeAsBytes(imglib.encodeJpg(gaussian, quality: 95));
+        variantPaths.add(path3);
+        // النسخة 4: threshold قوي
+        final img4 = imglib.grayscale(img.clone());
+        final t = manualThreshold(img4, 115);
+        final path4 =
+            '${Directory.systemTemp.path}/pre_thresh_${DateTime.now().microsecondsSinceEpoch}.jpg';
+        await File(path4).writeAsBytes(imglib.encodeJpg(t, quality: 95));
+        variantPaths.add(path4);
+      }
 
       List<Map<String, dynamic>> pinCandidates = [];
       List<Map<String, dynamic>> serialCandidates = [];
@@ -254,6 +389,7 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       print('═══════════════════════════════════════════════════════');
 
       bool earlyStop = false;
+      bool sixEnhanceRun = false;
       for (final path in variantPaths) {
         if (_debugOcr) print('\n🖼️ OCR pass on: $path');
         final inputImage = InputImage.fromFilePath(path);
@@ -264,6 +400,37 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         String fullText = recognizedText.text;
         if (fullText.trim().isEmpty) continue;
         if (_debugOcr) print('Raw OCR Text (len=${fullText.length})');
+
+        // تحسين موضعي حول العناصر '6'
+        if (!sixEnhanceRun) {
+          final enhancedSixPaths = await _enhanceAndReOcrSixes(
+            imagePath,
+            recognizedText.blocks,
+            textRecognizer,
+          );
+          for (final enhPath in enhancedSixPaths) {
+            final img = InputImage.fromFilePath(enhPath);
+            final ocr = await textRecognizer.processImage(img);
+            for (final block in ocr.blocks) {
+              for (final line in block.lines) {
+                String cleanText = cleanNumericText(line.text);
+                if (cleanText.contains('6') ||
+                    cleanText.contains('8') ||
+                    cleanText.contains('0')) {
+                  double conf = _calculateConfidence(line);
+                  _analyzeAndClassify(
+                    line,
+                    cleanText,
+                    conf,
+                    pinCandidates,
+                    serialCandidates,
+                  );
+                }
+              }
+            }
+          }
+          sixEnhanceRun = true;
+        }
 
         for (TextBlock block in recognizedText.blocks) {
           for (TextLine line in block.lines) {
@@ -285,25 +452,15 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
               if (_debugOcr)
                 print('💯 Confidence: ${(conf * 100).toStringAsFixed(1)}%');
 
-              double score = _calculateScore(line, cleanText, conf);
               _analyzeAndClassify(
                 line,
                 cleanText,
-                score,
                 conf,
                 pinCandidates,
                 serialCandidates,
               );
 
               // بدائل ذكية (بدون 5→6)
-              _augmentAmbiguousDigitVariants(
-                line,
-                cleanText,
-                score,
-                conf,
-                pinCandidates,
-                serialCandidates,
-              );
               if (isLikelyPin(cleanText) &&
                   conf >= _earlyStopConfidence &&
                   cleanText.length >= 14) {
@@ -338,19 +495,9 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
                   cleanText.length >= 11 &&
                   !_containsTextMarkers(line.text)) {
                 double conf = _calculateConfidence(line);
-                double score = _calculateScore(line, cleanText, conf);
                 _analyzeAndClassify(
                   line,
                   cleanText,
-                  score,
-                  conf,
-                  pinCandidates,
-                  serialCandidates,
-                );
-                _augmentAmbiguousDigitVariants(
-                  line,
-                  cleanText,
-                  score,
                   conf,
                   pinCandidates,
                   serialCandidates,
@@ -377,8 +524,8 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       }
 
       // معالجة ما بعد لتصحيح الأخطاء
-      _postProcessCandidates(pinCandidates);
-      _postProcessCandidates(serialCandidates);
+      // _postProcessCandidates(pinCandidates);
+      // _postProcessCandidates(serialCandidates);
 
       // إزالة المكررات مع الحفاظ على أعلى سكور
       pinCandidates = _dedupeByTextKeepBest(pinCandidates);
@@ -404,7 +551,7 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     for (final item in list) {
       final t = item['text'] as String;
       if (!best.containsKey(t) ||
-          (item['score'] as double) > (best[t]!['score'] as double)) {
+          (item['confidence'] as double) > (best[t]!['confidence'] as double)) {
         best[t] = item;
       }
     }
@@ -415,7 +562,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     List<Map<String, dynamic>> additional = [];
     for (var candidate in candidates) {
       String text = candidate['text'];
-      double baseScore = candidate['score'];
       double baseConfidence = candidate['confidence'];
 
       // تم إزالة توليد بدائل 5→6 لضمان عدم استبدال الأرقام تلقائياً
@@ -432,7 +578,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         String variant = text.substring(0, pos) + '7' + text.substring(pos + 1);
         additional.add({
           'text': variant,
-          'score': baseScore * 0.98,
           'confidence': baseConfidence * 0.98,
           'length': variant.length,
         });
@@ -452,7 +597,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
               text.substring(0, pos) + '0' + text.substring(pos + 1);
           additional.add({
             'text': variant,
-            'score': baseScore * 1.03,
             'confidence': baseConfidence * 0.98,
             'length': variant.length,
           });
@@ -516,53 +660,17 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         upperText.contains(RegExp(r'[A-Z]{3,}'));
   }
 
-  void _augmentAmbiguousDigitVariants(
-    TextLine line,
-    String cleanText,
-    double score,
-    double confidence,
-    List<Map<String, dynamic>> pinCandidates,
-    List<Map<String, dynamic>> serialCandidates,
-  ) {
-    // قواعد موضعية لفض الالتباس 5/6 و 0/9
-    final chars = cleanText.split('');
-    for (int i = 0; i < chars.length; i++) {
-      final prev = i > 0 ? chars[i - 1] : ' ';
-      final curr = chars[i];
-      final next = i + 1 < chars.length ? chars[i + 1] : ' ';
-
-      // تم إزالة توليد بدائل 5→6 لضمان عدم استبدال الأرقام تلقائياً
-
-      // 9→0 عند الجوار بـ 0، أو داخل سلاسل كثيرة الأصفار
-      if (curr == '9' && (prev == '0' || next == '0')) {
-        final v = cleanText.substring(0, i) + '0' + cleanText.substring(i + 1);
-        final entry = {
-          'text': v,
-          'score': score + 0.05,
-          'confidence': confidence * 0.98,
-          'length': v.length,
-        };
-        if (isLikelyPin(v))
-          pinCandidates.add(entry);
-        else if (isLikelySerial(v))
-          serialCandidates.add(entry);
-      }
-    }
-  }
-
   void _analyzeAndClassify(
     TextLine line,
     String cleanText,
-    double score,
     double confidence,
     List<Map<String, dynamic>> pinCandidates,
     List<Map<String, dynamic>> serialCandidates,
   ) {
     bool hasTextMarkers = _containsTextMarkers(line.text);
-
+    double score = _calculateScore(line, cleanText, confidence);
     if (isLikelyPin(cleanText)) {
       double pinBonus = hasTextMarkers ? 0.0 : 0.3;
-
       if ((scanType == 'Mob' &&
               cleanText.length >= 15 &&
               cleanText.length <= 21) ||
@@ -571,35 +679,34 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
               cleanText.length <= 19)) {
         pinBonus += 0.2;
       }
-
       if (cleanText.startsWith('6') ||
           cleanText.startsWith('2') ||
           cleanText.startsWith('1') ||
           cleanText.startsWith('0')) {
         pinBonus += 0.05;
       }
-
       pinCandidates.add({
         'text': cleanText,
-        'score': score + pinBonus,
         'confidence': confidence,
+        'score': score + pinBonus,
         'length': cleanText.length,
       });
-
-      print(
-        '   ✅ Possible PIN (score: ${(score + pinBonus).toStringAsFixed(3)})',
-      );
+      if (_debugOcr)
+        print(
+          '   ✅ Possible PIN (score: ${score.toStringAsFixed(3)}, conf: ${(confidence * 100).toStringAsFixed(1)}%)',
+        );
     }
-
     if (isLikelySerial(cleanText)) {
       serialCandidates.add({
         'text': cleanText,
-        'score': score,
         'confidence': confidence,
+        'score': score,
         'length': cleanText.length,
       });
-
-      print('   ✅ Possible Serial (score: ${score.toStringAsFixed(3)})');
+      if (_debugOcr)
+        print(
+          '   ✅ Possible Serial (score: ${score.toStringAsFixed(3)}, conf: ${(confidence * 100).toStringAsFixed(1)}%)',
+        );
     }
   }
 
@@ -623,7 +730,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
 
           pinCandidates.add({
             'text': combined,
-            'score': score,
             'confidence': confidence,
             'length': combined.length,
           });
@@ -640,32 +746,42 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       return;
     }
 
-    pinCandidates.sort((a, b) => b['score'].compareTo(a['score']));
-
-    pinAlternatives = pinCandidates
-        .map((c) => c['text'] as String)
-        .toSet()
+    // فلترة صارمة: الطول 14 فقط وبدون رموز
+    final valid = pinCandidates
+        .where(
+          (c) =>
+              (c['text'] as String).length == 14 &&
+              RegExp(r'^\d{14} *$').hasMatch(c['text'] as String),
+        )
         .toList();
+    valid.sort(
+      (a, b) => (b['score'] as double).compareTo(a['score'] as double),
+    );
+    final mainList = valid.isNotEmpty ? valid : pinCandidates;
 
-    var validPins = pinCandidates.where((c) => c['confidence'] >= 0.5).toList();
-    if (validPins.isEmpty) validPins = pinCandidates;
+    // ترتيب الكل وعرض أعلى 3
+    final ranked = List<Map<String, dynamic>>.from(mainList);
+    ranked.sort(
+      (a, b) => (b['score'] as double).compareTo(a['score'] as double),
+    );
+    pinAlternatives = ranked.take(3).map((c) => c['text'] as String).toList();
 
-    final bestScore = validPins.first['score'];
-    final topCandidates = validPins
-        .where((c) => (bestScore - c['score']).abs() < 0.2)
-        .toList();
-
-    if (topCandidates.length > 1) {
-      topCandidates.sort((a, b) {
-        int confCompare = b['confidence'].compareTo(a['confidence']);
-        if (confCompare != 0) return confCompare;
-        return b['length'].compareTo(a['length']);
-      });
+    if (pinAlternatives.isNotEmpty) {
+      pin.text = pinAlternatives.first;
+      print("\n📋 All PIN options found:");
+      for (int i = 0; i < pinAlternatives.length; ++i) {
+        final c = ranked[i];
+        print(
+          '   → ${i + 1}. ${c['text']}\n      Conf: ${((c['confidence'] ?? 0.0) * 100).toStringAsFixed(1)}%, Len: ${c['length']}',
+        );
+      }
     }
 
-    pin.text = topCandidates.first['text'];
+    if (pinAlternatives.isEmpty) {
+      print('\n⚠️  No valid PIN with required length detected');
+      _printPinTips();
+    }
 
-    _printPinResults(topCandidates.first, pinCandidates);
     emit(ScanPinSuccess());
   }
 
@@ -675,29 +791,39 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       print('\n⚠️  No valid Serial detected\n');
       return;
     }
-
-    serialCandidates.sort((a, b) => b['score'].compareTo(a['score']));
-    serialAlternatives = serialCandidates
+    // فلترة صارمة: الطول 12 فقط وبدون رموز
+    final valid = serialCandidates
+        .where(
+          (c) =>
+              (c['text'] as String).length == 12 &&
+              RegExp(r'^\d{12} *$').hasMatch(c['text'] as String),
+        )
+        .toList();
+    valid.sort(
+      (a, b) => (b['score'] as double).compareTo(a['score'] as double),
+    );
+    final mainList = valid.isNotEmpty ? valid : serialCandidates;
+    final ranked = List<Map<String, dynamic>>.from(mainList);
+    ranked.sort(
+      (a, b) => (b['score'] as double).compareTo(a['score'] as double),
+    );
+    serialAlternatives = ranked
+        .take(3)
         .map((c) => c['text'] as String)
-        .toSet()
         .toList();
-
-    final bestScore = serialCandidates.first['score'];
-    final topCandidates = serialCandidates
-        .where((c) => (bestScore - c['score']).abs() < 0.1)
-        .toList();
-
-    if (topCandidates.length > 1) {
-      topCandidates.sort((a, b) {
-        int confCompare = b['confidence'].compareTo(a['confidence']);
-        if (confCompare != 0) return confCompare;
-        return b['length'].compareTo(a['length']);
-      });
+    if (serialAlternatives.isNotEmpty) {
+      serial.text = serialAlternatives.first;
+      print("\n📋 All Serial options found:");
+      for (int i = 0; i < serialAlternatives.length; ++i) {
+        final c = ranked[i];
+        print(
+          '   → ${i + 1}. ${c['text']}\n      Conf: ${((c['confidence'] ?? 0.0) * 100).toStringAsFixed(1)}%, Len: ${c['length']}',
+        );
+      }
     }
-
-    serial.text = topCandidates.first['text'];
-
-    _printSerialResults(topCandidates.first, serialCandidates);
+    if (serialAlternatives.isEmpty) {
+      print('\n⚠️  No valid Serial with required length detected');
+    }
   }
 
   void _printPinResults(
@@ -706,7 +832,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   ) {
     print('\n═══════════════════════════════════════════════════════');
     print('🎯 SELECTED PIN: ${pin.text}');
-    print('   📊 Score: ${selected['score'].toStringAsFixed(3)}');
     print(
       '   💯 Confidence: ${(selected['confidence'] * 100).toStringAsFixed(1)}%',
     );
@@ -722,8 +847,7 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         String marker = i == 0 ? '→' : ' ';
         print('      $marker ${i + 1}. ${all[i]['text']}');
         print(
-          '         Score: ${all[i]['score'].toStringAsFixed(3)}, ' +
-              'Conf: ${(all[i]['confidence'] * 100).toStringAsFixed(1)}%, ' +
+          '         Conf: ${(all[i]['confidence'] * 100).toStringAsFixed(1)}%, ' +
               'Len: ${all[i]['length']}',
         );
       }
@@ -738,7 +862,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   ) {
     print('\n═══════════════════════════════════════════════════════');
     print('🎯 SELECTED SERIAL: ${serial.text}');
-    print('   📊 Score: ${selected['score'].toStringAsFixed(3)}');
     print(
       '   💯 Confidence: ${(selected['confidence'] * 100).toStringAsFixed(1)}%',
     );
@@ -833,6 +956,12 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     }
   }
 
+  List<String> filterSerials(List<String> options) =>
+      options.where((s) => s.length == 12).toList();
+
+  List<String> filterPins(List<String> options) =>
+      options.where((p) => p.length == 14).toList();
+
   // ============== Alternative Selection ==============
 
   void selectPinAlternative(int index) {
@@ -906,5 +1035,157 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     pin.dispose();
     serial.dispose();
     return super.close();
+  }
+
+  Future<String> matchDigitWithTemplates(Uint8List digitBytes) async {
+    await _ensureTemplatesLoaded();
+    const int imreadGray = 0, method = 5;
+
+    final digitMat = cv.imdecode(digitBytes, imreadGray);
+
+    // تقليل المتغيرات لسرعة أعلى: الأصلي + threshold فقط
+    var (__, threshMat) = cv.threshold(digitMat, 150, 255, cv.THRESH_BINARY);
+
+    final variants = <dynamic>[digitMat, threshMat]; // Mat فقط
+
+    // حساب النتائج على الكاش مباشرة (دون قراءة ملفات كل مرة)
+    final results = <String, double>{};
+    for (final entry in _templateMatsCache.entries) {
+      final digit = entry.key;
+      double best = 0.0;
+      for (final templMat in entry.value) {
+        for (final v in variants) {
+          final templResized = cv.resize(templMat, (v.width, v.height));
+          final (minVal, maxVal, _, __) = cv.minMaxLoc(
+            cv.matchTemplate(v, templResized, method),
+          );
+          if (maxVal > best) best = maxVal;
+        }
+      }
+      results[digit] = best;
+    }
+
+    if (_debugOcr) print('FAST Template scores: $results');
+    final sorted = results.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    if (sorted.isEmpty) return '?';
+
+    // early stop صارم: لو الثقة عالية والفارق واضح لا نكمل أي تحويرات إضافية
+    if (sorted.first.value >= 0.85 &&
+        (sorted.length == 1 || sorted.first.value - sorted[1].value >= 0.20)) {
+      return sorted.first.key;
+    }
+
+    // حالة الشك: نضيف تدوير خفيف ±2 فقط ثم نعيد القياس على أعلى رقمين فقط
+    final topDigits = sorted.take(2).map((e) => e.key).toList();
+    var (ok1, rotP) = cv.imencode('.jpg', cv.rotate(digitMat, 2));
+    var (ok2, rotN) = cv.imencode('.jpg', cv.rotate(digitMat, -2));
+    final rotPmat = cv.imdecode(rotP, imreadGray);
+    final rotNmat = cv.imdecode(rotN, imreadGray);
+    final extraVariants = <dynamic>[rotPmat, rotNmat];
+
+    for (final d in topDigits) {
+      double best = results[d] ?? 0.0;
+      final templList = _templateMatsCache[d] ?? [];
+      for (final templMat in templList) {
+        for (final v in extraVariants) {
+          final templResized = cv.resize(templMat, (v.width, v.height));
+          final (minVal, maxVal, _, __) = cv.minMaxLoc(
+            cv.matchTemplate(v, templResized, method),
+          );
+          if (maxVal > best) best = maxVal;
+        }
+      }
+      results[d] = best;
+    }
+
+    final finalSorted = results.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    if (_debugOcr) print('FINAL Template scores: $finalSorted');
+
+    if (finalSorted.first.value >= 0.85 &&
+        (finalSorted.length == 1 ||
+            finalSorted.first.value - finalSorted[1].value >= 0.18)) {
+      return finalSorted.first.key;
+    }
+    return '?';
+  }
+
+  void correctDigitAmbiguity({
+    required List<Map<String, dynamic>> candidates,
+    required String originalImagePath,
+    required Function(String) onCorrected,
+  }) async {
+    if (candidates.length < 2) return;
+    final base = candidates[0]['text'] as String;
+    final other = candidates[1]['text'] as String;
+    if (base.length != other.length) return;
+    // استخراج أول موضع اختلاف (أو كلها)
+    for (int i = 0; i < base.length; i++) {
+      if (base[i] != other[i]) {
+        // قصّ منطقة حول الرقم المختلف للصورة كاملة
+        final bytes = await File(originalImagePath).readAsBytes();
+        imglib.Image? img = imglib.decodeImage(bytes);
+        if (img == null) continue;
+        // اعتبار block واحد وخط واحد، نقيس تقريبياً ...
+        int numDigits = base.length;
+        int x = (img.width * (i / numDigits)).toInt();
+        int w = (img.width ~/ numDigits).clamp(16, 56);
+        int h = (img.height ~/ 15).clamp(20, img.height ~/ 3);
+        int y = (img.height ~/ 2) - h ~/ 2;
+        x = x.clamp(0, img.width - w);
+        y = y.clamp(0, img.height - h);
+        var crop = imglib.copyCrop(img, x: x, y: y, width: w, height: h);
+        crop = imglib.contrast(crop, contrast: 290);
+        final path =
+            '${Directory.systemTemp.path}/fixdigit_crop_${i}_${DateTime.now().microsecondsSinceEpoch}.jpg';
+        await File(path).writeAsBytes(imglib.encodeJpg(crop, quality: 97));
+        final input = InputImage.fromFilePath(path);
+        final textRecognizer = TextRecognizer(
+          script: TextRecognitionScript.latin,
+        );
+        final res = await textRecognizer.processImage(input);
+        String bestDigit = base[i];
+        double bestConf = 0.0;
+        for (final block in res.blocks) {
+          for (final line in block.lines) {
+            String txt = cleanNumericText(line.text);
+            if (txt.isNotEmpty && txt.length == 1) {
+              // حساب ثقة تقديري (OCR لا يعطي لكل رقم ثقة لكن نقدرها)
+              double conf = _calculateConfidence(line);
+              if (conf > bestConf) {
+                bestDigit = txt;
+                bestConf = conf;
+              }
+            }
+          }
+        }
+        print(
+          'تصحيح الخانة $i، قُرئت: ${base[i]}, البديل: ${other[i]}, النتيجة: $bestDigit, ثقة: ${(bestConf * 100).toStringAsFixed(2)}%',
+        );
+        // دمج الـdigit المصحح مع النتيجة
+        String corrected =
+            base.substring(0, i) + bestDigit + base.substring(i + 1);
+        onCorrected(corrected);
+        break;
+      }
+    }
+  }
+
+  List<Map<String, dynamic>> filterValidSerialCandidates(
+    List<Map<String, dynamic>> candidates,
+  ) {
+    // فقط بطول 12 ولا تُقبل نتائج أصغر حتى لو score عالي
+    final valid = candidates
+        .where((c) => (c['text'] as String).length == 12)
+        .toList();
+    // إذا أكتر من بنتيجة 12 رقم، اختار الأعلى Score فقط
+    if (valid.length > 1) {
+      valid.sort(
+        (a, b) => (b['score'] as double).compareTo(a['score'] as double),
+      );
+      return [valid.first];
+    }
+    return valid;
   }
 }
