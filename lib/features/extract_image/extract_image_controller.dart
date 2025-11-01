@@ -40,17 +40,22 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
 
   // كاش لقوالب الأرقام كمصفوفات Mat جاهزة (لتفادي I/O والتكرار)
   Map<String, List<String>> _templatePaths = {
-    '0': ['assets/digit_templates/template_0.jpeg'],
-    '3': ['assets/digit_templates/template_3.jpeg'],
+    '0': [
+      'assets/digit_templates/template_0.jpeg',
+    ],
+    '3': [
+      'assets/digit_templates/template_3.jpeg',
+    ],
     '5': ['assets/digit_templates/template_5.jpeg'],
     '6': [
-      'assets/digit_templates/template_6.jpeg',
       'assets/digit_templates/template_6_A.jpeg',
       'assets/digit_templates/template_6_B.jpeg',
       'assets/digit_templates/template_6_C.jpeg',
     ],
     '8': ['assets/digit_templates/template_8.jpeg'],
-    '9': ['assets/digit_templates/template_9.jpeg'],
+    '9': [
+      'assets/digit_templates/template_9.jpeg',
+    ],
   };
   final Map<String, List<dynamic>> _templateMatsCache = {}; // key -> List<Mat>
   bool _templatesLoaded = false;
@@ -136,16 +141,36 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       imglib.Image? img = imglib.decodeImage(bytes);
 
       if (img != null) {
-        if (img.width > 1024) {
-          img = imglib.copyResize(img, width: 1024);
+        // تحسين الدقة - استخدام حجم أكبر للاحتفاظ بتفاصيل الأرقام
+        if (img.width > 1280) {
+          img = imglib.copyResize(img, width: 1280);
+        } else if (img.width < 800) {
+          img = imglib.copyResize(img, width: 800);
         }
 
         imglib.Image gray = imglib.grayscale(img);
+        
+        // معالجة متقدمة للصورة
+        // 1. تقليل الضوضاء بشكل خفيف
         gray = imglib.gaussianBlur(gray, radius: 1);
-        // خريطة الحواف (Sobel) ثم مزجها لزيادة وضوح الحروف
+        
+        // 2. تطبيق CLAHE يدوياً (Contrast Limited Adaptive Histogram Equalization)
+        gray = _applyCLAHE(gray);
+        
+        // 3. زيادة الحدة (Sharpening) للأرقام
+        gray = _sharpenImage(gray);
+        
+        // 4. خريطة الحواف (Sobel) ثم مزجها لزيادة وضوح الأرقام
         final edges = _sobelEdges(gray);
-        gray = _blendGrayAndEdges(gray, edges, 0.35);
-        gray = imglib.contrast(gray, contrast: 170);
+        gray = _blendGrayAndEdges(gray, edges, 0.30);
+        
+        // 5. تطبيق Morphological operations لتحسين الأرقام
+        gray = _applyMorphology(gray);
+        
+        // 6. تحسين التباين بشكل قوي
+        gray = imglib.contrast(gray, contrast: 200);
+        
+        // 7. تطبيع النطاق
         gray = imglib.normalize(gray, max: 255, min: 0);
 
         final processedBytes = imglib.encodeJpg(gray, quality: 100);
@@ -155,13 +180,125 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
             '${tempDir.path}/processed_${DateTime.now().millisecondsSinceEpoch}.jpg';
         await File(tempPath).writeAsBytes(processedBytes);
 
-        print('✅ Image processed for better OCR: $tempPath');
+        print('✅ Image processed with advanced techniques: $tempPath');
         return tempPath;
       }
     } catch (e) {
       print('⚠️ Error processing image: $e');
     }
     return imagePath;
+  }
+
+  // تطبيق CLAHE يدوياً (Contrast Limited Adaptive Histogram Equalization)
+  imglib.Image _applyCLAHE(imglib.Image gray) {
+    // تقسيم الصورة إلى مربعات صغيرة وتطبيق histogram equalization على كل مربع
+    const int tileSize = 8;
+    final w = gray.width, h = gray.height;
+    final result = gray.clone();
+    
+    for (int ty = 0; ty < h; ty += tileSize) {
+      for (int tx = 0; tx < w; tx += tileSize) {
+        int tw = Math.min(tileSize, w - tx);
+        int th = Math.min(tileSize, h - ty);
+        
+        // حساب الهيستوجرام للمربع
+        List<int> hist = List.filled(256, 0);
+        for (int y = ty; y < ty + th; y++) {
+          for (int x = tx; x < tx + tw; x++) {
+            int val = imglib.getLuminance(gray.getPixel(x, y)).toInt();
+            hist[val]++;
+          }
+        }
+        
+        // حساب CDF (Cumulative Distribution Function)
+        List<int> cdf = List.filled(256, 0);
+        cdf[0] = hist[0];
+        for (int i = 1; i < 256; i++) {
+          cdf[i] = cdf[i - 1] + hist[i];
+        }
+        
+        // تطبيع CDF
+        int cdfMin = cdf.firstWhere((v) => v > 0);
+        int totalPixels = tw * th;
+        
+        for (int y = ty; y < ty + th; y++) {
+          for (int x = tx; x < tx + tw; x++) {
+            int val = imglib.getLuminance(gray.getPixel(x, y)).toInt();
+            int newVal = ((cdf[val] - cdfMin) * 255 / (totalPixels - cdfMin)).clamp(0, 255).toInt();
+            result.setPixelRgba(x, y, newVal, newVal, newVal, 255);
+          }
+        }
+      }
+    }
+    
+    return result;
+  }
+
+  // تطبيق Sharpening filter
+  imglib.Image _sharpenImage(imglib.Image gray) {
+    final w = gray.width, h = gray.height;
+    final out = imglib.Image(width: w, height: h);
+    
+    // Sharpening kernel
+    const List<List<int>> kernel = [
+      [0, -1, 0],
+      [-1, 5, -1],
+      [0, -1, 0],
+    ];
+    
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        int sum = 0;
+        for (int j = -1; j <= 1; j++) {
+          for (int i = -1; i <= 1; i++) {
+            final p = gray.getPixel(x + i, y + j);
+            final int v = imglib.getLuminance(p).toInt();
+            sum += kernel[j + 1][i + 1] * v;
+          }
+        }
+        int val = sum.clamp(0, 255).toInt();
+        out.setPixelRgba(x, y, val, val, val, 255);
+      }
+    }
+    
+    return out;
+  }
+
+  // تطبيق Morphological operations (Dilation + Erosion)
+  imglib.Image _applyMorphology(imglib.Image gray) {
+    final w = gray.width, h = gray.height;
+    
+    // Erosion (تقليل السُمك) لإزالة الضوضاء الصغيرة
+    var temp = imglib.Image(width: w, height: h);
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        int minVal = 255;
+        for (int j = -1; j <= 1; j++) {
+          for (int i = -1; i <= 1; i++) {
+            int val = imglib.getLuminance(gray.getPixel(x + i, y + j)).toInt();
+            if (val < minVal) minVal = val;
+          }
+        }
+        temp.setPixelRgba(x, y, minVal, minVal, minVal, 255);
+      }
+    }
+    
+    // Dilation (زيادة السُمك) لتوضيح الأرقام
+    final out = imglib.Image(width: w, height: h);
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        int maxVal = 0;
+        for (int j = -1; j <= 1; j++) {
+          for (int i = -1; i <= 1; i++) {
+            int val = imglib.getLuminance(temp.getPixel(x + i, y + j)).toInt();
+            if (val > maxVal) maxVal = val;
+          }
+        }
+        out.setPixelRgba(x, y, maxVal, maxVal, maxVal, 255);
+      }
+    }
+    
+    return out;
   }
 
   // Note: استخدمنا فلترة خفيفة متوافقة مع الحزمة الحالية لتفادي أخطاء البناء
@@ -229,42 +366,62 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     final bytes = await File(originalImagePath).readAsBytes();
     imglib.Image? base = imglib.decodeImage(bytes);
     int ix = 0;
+    
+    // توسيع القائمة لتشمل جميع الأرقام الملتبسة: 6, 5, 8, 0, 9, 3
+    final ambiguousDigits = ['6', '5', '8', '0', '9', '3'];
+    
     for (final block in blocks) {
       for (final line in block.lines) {
         for (final element in line.elements) {
           final txt = element.text.trim();
-          if (txt == '6' || txt == '8' || txt == '0' || txt == '5') {
+          
+          // فحص إذا كان النص يحتوي على أي رقم ملتبس
+          if (ambiguousDigits.contains(txt)) {
             final rect = element.boundingBox;
-            if (rect != null) {
-              int x = (rect.left - 8).toInt();
-              int y = (rect.top - 8).toInt();
-              int w = (rect.width + 16).toInt();
-              int h = (rect.height + 16).toInt();
+            if (rect.left >= 0 && rect.top >= 0) {
+              // توسيع المنطقة المقصوصة لضمان التقاط الرقم كاملاً
+              int x = (rect.left - 12).toInt();
+              int y = (rect.top - 12).toInt();
+              int w = (rect.width + 24).toInt();
+              int h = (rect.height + 24).toInt();
+              
               x = x.clamp(0, base!.width - 1);
               y = y.clamp(0, base.height - 1);
               if (x + w > base.width) w = base.width - x;
               if (y + h > base.height) h = base.height - y;
-              final crop = imglib.copyCrop(
-                base,
-                x: x,
-                y: y,
-                width: w,
-                height: h,
-              );
-              final enhanced = imglib.contrast(crop!, contrast: 290);
-              final tempPath =
-                  '${Directory.systemTemp.path}/ocr_digit_${txt}_${DateTime.now().microsecondsSinceEpoch}_$ix.jpg';
-              await File(
-                tempPath,
-              ).writeAsBytes(imglib.encodeJpg(enhanced, quality: 95));
+              
+              if (w > 5 && h > 5) {
+                final crop = imglib.copyCrop(
+                  base,
+                  x: x,
+                  y: y,
+                  width: w,
+                  height: h,
+                );
+                
+                // تطبيق معالجة متقدمة على الرقم المقصوص
+                var enhanced = imglib.grayscale(crop);
+                enhanced = _sharpenImage(enhanced);
+                enhanced = imglib.contrast(enhanced, contrast: 300);
+                enhanced = imglib.normalize(enhanced, max: 255, min: 0);
+                
+                final tempPath =
+                    '${Directory.systemTemp.path}/ocr_digit_${txt}_${DateTime.now().microsecondsSinceEpoch}_$ix.jpg';
+                await File(tempPath).writeAsBytes(
+                  imglib.encodeJpg(enhanced, quality: 100),
+                );
 
-              // إجراء template matching
-              final digitBytes = await File(tempPath).readAsBytes();
-              final bestDigit = await matchDigitWithTemplates(digitBytes);
-              print('Digit ($txt) matched as: $bestDigit');
-              // يمكن تخزين النتيجة أو استخدامها لاحقاً هنا أو عند التصحيح
-              results.add(tempPath);
-              ix++;
+                // إجراء template matching
+                final digitBytes = await File(tempPath).readAsBytes();
+                final bestDigit = await matchDigitWithTemplates(digitBytes);
+                
+                if (bestDigit != txt) {
+                  print('   🔧 Digit correction: OCR said "$txt" but template matching says "$bestDigit"');
+                }
+                
+                results.add(tempPath);
+                ix++;
+              }
             }
           }
         }
@@ -618,35 +775,79 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   }
 
   double _calculateScore(TextLine line, String cleanText, double confidence) {
-    double score = confidence * 1.5;
+    double score = confidence * 2.0; // زيادة وزن الثقة
 
+    // عقوبات بناءً على مستوى الثقة
+    if (confidence < 0.80) score *= 0.90;
     if (confidence < 0.75) score *= 0.85;
-    if (confidence < 0.70) score *= 0.80;
-    if (confidence < 0.65) score *= 0.75;
-    if (confidence < 0.60) score *= 0.65;
-    if (confidence < 0.50) score *= 0.40;
+    if (confidence < 0.70) score *= 0.75;
+    if (confidence < 0.65) score *= 0.65;
+    if (confidence < 0.60) score *= 0.50;
+    if (confidence < 0.50) score *= 0.30;
 
-    score += (cleanText.length / 80.0);
+    // مكافأة للطول المناسب
+    score += (cleanText.length / 60.0);
 
+    // مكافأة لقلة الرموز (نص نظيف)
     int symbolCount = line.text.length - cleanText.length;
+    if (symbolCount == 0) score += 0.25;
     if (symbolCount <= 2) score += 0.15;
-    if (symbolCount == 0) score += 0.1;
+    if (symbolCount > 5) score *= 0.6;
 
+    // عقوبة شديدة لوجود نصوص (كلمات)
     if (_containsTextMarkers(line.text)) {
-      score *= 0.2;
-      print('   ⚠️  Contains text/words - likely NOT a number field');
+      score *= 0.1;
+      print('   ⚠️  Contains text/words - heavily penalized');
     }
 
-    if (symbolCount > 5) {
-      score *= 0.7;
+    // مكافآت خاصة للطول المثالي
+    if (isLikelyPin(cleanText)) {
+      if (cleanText.length == 14) score += 0.35; // الطول المثالي للـ PIN
+      else if (cleanText.length >= 15 && cleanText.length <= 16) score += 0.20;
+      else if (cleanText.length >= 17 && cleanText.length <= 19) score += 0.10;
+    }
+    
+    if (isLikelySerial(cleanText)) {
+      if (cleanText.length == 12) score += 0.35; // الطول المثالي للـ Serial
+      else if (cleanText.length == 11) score += 0.15;
     }
 
-    if (isLikelyPin(cleanText) && cleanText.length == 14) score += 0.2;
-    if (isLikelySerial(cleanText) &&
-        (cleanText.length == 12 || cleanText.length == 11))
-      score += 0.2;
+    // مكافأة للأنماط المتوقعة في بداية الأرقام
+    if (cleanText.length >= 3) {
+      String firstThree = cleanText.substring(0, 3);
+      // أنماط شائعة في بطاقات زين
+      if (firstThree.startsWith('6') || 
+          firstThree.startsWith('2') || 
+          firstThree.startsWith('1') ||
+          firstThree.startsWith('0')) {
+        score += 0.10;
+      }
+    }
+
+    // فحص عدم وجود أرقام مشبوهة متكررة بشكل غير طبيعي
+    if (_hasAbnormalRepetition(cleanText)) {
+      score *= 0.85;
+      print('   ⚠️  Abnormal digit repetition detected');
+    }
 
     return score;
+  }
+
+  // فحص التكرار غير الطبيعي للأرقام
+  bool _hasAbnormalRepetition(String text) {
+    if (text.length < 4) return false;
+    
+    // فحص إذا كان هناك رقم متكرر أكثر من 5 مرات متتالية
+    for (int i = 0; i <= text.length - 5; i++) {
+      if (text[i] == text[i + 1] && 
+          text[i] == text[i + 2] && 
+          text[i] == text[i + 3] &&
+          text[i] == text[i + 4]) {
+        return true;
+      }
+    }
+    
+    return false;
   }
 
   bool _containsTextMarkers(String text) {
@@ -901,23 +1102,79 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     text = text.toUpperCase();
     // تحويل الأرقام العربية-الهندية إلى لاتينية
     text = _normalizeArabicIndicDigits(text);
+    
+    // تصحيحات ذكية للأحرف الشبيهة بالأرقام
     text = text
         .replaceAll('D', '0')
         .replaceAll('O', '0')
+        .replaceAll('Q', '0')
         .replaceAll('I', '1')
         .replaceAll('L', '1')
         .replaceAll('Z', '2')
         .replaceAll('S', '5')
         .replaceAll('B', '8')
-        .replaceAll('G', '6')
         .replaceAll('A', '4')
-        .replaceAll('Q', '0')
-        .replaceAll('?', '7'); // تصحيح ? إلى 7
+        .replaceAll('?', '7');
 
-    return text
+    // إزالة الرموز والمسافات
+    text = text
         .replaceAll(RegExp(r'\s'), '')
-        .replaceAll(RegExp(r'[-_.]'), '')
-        .replaceAll(RegExp(r'[^\d]'), '');
+        .replaceAll(RegExp(r'[-_.]'), '');
+    
+    // تطبيق قواعد منطقية للتصحيح بناءً على السياق
+    text = _applyContextualCorrections(text);
+    
+    // إزالة أي شيء ليس رقماً
+    return text.replaceAll(RegExp(r'[^\d]'), '');
+  }
+
+  // تطبيق تصحيحات بناءً على السياق المحيط
+  String _applyContextualCorrections(String text) {
+    String corrected = '';
+    
+    for (int i = 0; i < text.length; i++) {
+      String current = text[i];
+      String prev = i > 0 ? text[i - 1] : '';
+      String next = i < text.length - 1 ? text[i + 1] : '';
+      
+      // قاعدة 1: إذا كان 'G' محاط بأرقام، فهو غالباً '6'
+      if (current == 'G' && 
+          (RegExp(r'\d').hasMatch(prev) || RegExp(r'\d').hasMatch(next))) {
+        corrected += '6';
+        continue;
+      }
+      
+      // قاعدة 2: إذا كان '5' في نهاية مجموعة من الأصفار، فهو غالباً '5' صحيح
+      if (current == '5' && prev == '0' && next == '0') {
+        corrected += '5';
+        continue;
+      }
+      
+      // قاعدة 3: إذا كان 'S' محاط بأرقام، فهو غالباً '5'
+      if (current == 'S' && 
+          (RegExp(r'\d').hasMatch(prev) || RegExp(r'\d').hasMatch(next))) {
+        corrected += '5';
+        continue;
+      }
+      
+      // قاعدة 4: نمط متكرر من الأصفار (000) يجب أن يبقى كما هو
+      if (current == '0' && prev == '0' && next == '0') {
+        corrected += '0';
+        continue;
+      }
+      
+      // قاعدة 5: إذا كان '9' في بداية السلسلة وبعده أرقام صغيرة، قد يكون '0'
+      if (current == '9' && i < 3 && 
+          (next == '0' || next == '1' || next == '2')) {
+        // احتفظ بـ 9 لأنه قد يكون صحيحاً في البطاقات
+        corrected += current;
+        continue;
+      }
+      
+      corrected += current;
+    }
+    
+    return corrected;
   }
 
   String _normalizeArabicIndicDigits(String input) {
@@ -1039,76 +1296,196 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
 
   Future<String> matchDigitWithTemplates(Uint8List digitBytes) async {
     await _ensureTemplatesLoaded();
-    const int imreadGray = 0, method = 5;
+    const int imreadGray = 0;
 
     final digitMat = cv.imdecode(digitBytes, imreadGray);
 
-    // تقليل المتغيرات لسرعة أعلى: الأصلي + threshold فقط
-    var (__, threshMat) = cv.threshold(digitMat, 150, 255, cv.THRESH_BINARY);
+    // توليد variants متعددة للرقم المدخل لزيادة فرص المطابقة
+    final variants = <dynamic>[]; // List of Mat
+    
+    // 1. الأصلي
+    variants.add(digitMat);
+    
+    // 2. تطبيق عدة threshold values
+    for (double thresh in [120.0, 140.0, 160.0, 180.0]) {
+      var (_, threshMat) = cv.threshold(digitMat, thresh, 255, cv.THRESH_BINARY);
+      variants.add(threshMat);
+    }
+    
+    // 3. تطبيق Adaptive threshold
+    var adaptThresh = cv.adaptiveThreshold(
+      digitMat, 
+      255, 
+      cv.ADAPTIVE_THRESH_GAUSSIAN_C, 
+      cv.THRESH_BINARY, 
+      11, 
+      2
+    );
+    variants.add(adaptThresh);
+    
+    // 4. تطبيق Otsu's threshold
+    var (_, otsuMat) = cv.threshold(
+      digitMat, 
+      0, 
+      255, 
+      cv.THRESH_BINARY + cv.THRESH_OTSU
+    );
+    variants.add(otsuMat);
 
-    final variants = <dynamic>[digitMat, threshMat]; // Mat فقط
-
-    // حساب النتائج على الكاش مباشرة (دون قراءة ملفات كل مرة)
+    // حساب النتائج مع استخدام عدة طرق للمقارنة
     final results = <String, double>{};
+    final methods = [
+      cv.TM_CCOEFF_NORMED,  // Method 5
+      cv.TM_CCORR_NORMED,   // Method 3
+      cv.TM_SQDIFF_NORMED,  // Method 1 (inverted score)
+    ];
+    
     for (final entry in _templateMatsCache.entries) {
       final digit = entry.key;
-      double best = 0.0;
+      double bestScore = 0.0;
+      
       for (final templMat in entry.value) {
         for (final v in variants) {
           final templResized = cv.resize(templMat, (v.width, v.height));
-          final (minVal, maxVal, _, __) = cv.minMaxLoc(
-            cv.matchTemplate(v, templResized, method),
-          );
-          if (maxVal > best) best = maxVal;
+          
+          for (int methodIdx = 0; methodIdx < methods.length; methodIdx++) {
+            final method = methods[methodIdx];
+            final resultMat = cv.matchTemplate(v, templResized, method);
+            final (minVal, maxVal, _, __) = cv.minMaxLoc(resultMat);
+            
+            double score;
+            if (method == cv.TM_SQDIFF_NORMED) {
+              // For SQDIFF, lower is better, so invert
+              score = 1.0 - minVal;
+            } else {
+              score = maxVal;
+            }
+            
+            // وزن أعلى للطريقة الأولى (TM_CCOEFF_NORMED)
+            double weight = methodIdx == 0 ? 1.5 : 1.0;
+            score *= weight;
+            
+            if (score > bestScore) bestScore = score;
+          }
         }
       }
-      results[digit] = best;
+      
+      results[digit] = bestScore;
     }
 
-    if (_debugOcr) print('FAST Template scores: $results');
+    if (_debugOcr) print('🔍 Enhanced Template scores: $results');
+    
     final sorted = results.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
+    
     if (sorted.isEmpty) return '?';
 
-    // early stop صارم: لو الثقة عالية والفارق واضح لا نكمل أي تحويرات إضافية
-    if (sorted.first.value >= 0.85 &&
-        (sorted.length == 1 || sorted.first.value - sorted[1].value >= 0.20)) {
-      return sorted.first.key;
+    // تحليل النتائج وتطبيق قواعد ذكية
+    final first = sorted.first;
+    final second = sorted.length > 1 ? sorted[1] : null;
+    
+    // early stop مع ثقة عالية جداً
+    if (first.value >= 1.2 && 
+        (second == null || first.value - second.value >= 0.30)) {
+      print('   ✅ High confidence match: ${first.key} (score: ${first.value.toStringAsFixed(3)})');
+      return first.key;
     }
 
-    // حالة الشك: نضيف تدوير خفيف ±2 فقط ثم نعيد القياس على أعلى رقمين فقط
-    final topDigits = sorted.take(2).map((e) => e.key).toList();
-    var (ok1, rotP) = cv.imencode('.jpg', cv.rotate(digitMat, 2));
-    var (ok2, rotN) = cv.imencode('.jpg', cv.rotate(digitMat, -2));
-    final rotPmat = cv.imdecode(rotP, imreadGray);
-    final rotNmat = cv.imdecode(rotN, imreadGray);
-    final extraVariants = <dynamic>[rotPmat, rotNmat];
-
-    for (final d in topDigits) {
-      double best = results[d] ?? 0.0;
-      final templList = _templateMatsCache[d] ?? [];
-      for (final templMat in templList) {
-        for (final v in extraVariants) {
-          final templResized = cv.resize(templMat, (v.width, v.height));
-          final (minVal, maxVal, _, __) = cv.minMaxLoc(
-            cv.matchTemplate(v, templResized, method),
-          );
-          if (maxVal > best) best = maxVal;
+    // حالة الشك المتوسط: تدوير ومحاولات إضافية
+    if (first.value >= 0.90 && first.value < 1.2) {
+      print('   ⚠️ Medium confidence: ${first.key} vs ${second?.key ?? "?"} - applying rotation tests...');
+      
+      final topDigits = sorted.take(3).map((e) => e.key).toList();
+      
+      // تدوير بزوايا مختلفة
+      for (int angle in [-3, -2, -1, 1, 2, 3]) {
+        var (ok, rotBytes) = cv.imencode('.jpg', cv.rotate(digitMat, angle));
+        if (ok) {
+          final rotMat = cv.imdecode(rotBytes, imreadGray);
+          
+          for (final d in topDigits) {
+            double best = results[d] ?? 0.0;
+            final templList = _templateMatsCache[d] ?? [];
+            
+            for (final templMat in templList) {
+              final templResized = cv.resize(templMat, (rotMat.width, rotMat.height));
+              final resultMat = cv.matchTemplate(rotMat, templResized, cv.TM_CCOEFF_NORMED);
+              final (_, maxVal, _, __) = cv.minMaxLoc(resultMat);
+              
+              if (maxVal > best) best = maxVal;
+            }
+            
+            if (best > (results[d] ?? 0.0)) {
+              results[d] = best;
+            }
+          }
         }
       }
-      results[d] = best;
+      
+      final finalSorted = results.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      
+      if (_debugOcr) print('   🔄 After rotation - Template scores: $finalSorted');
+      
+      if (finalSorted.first.value >= 1.0 &&
+          (finalSorted.length == 1 ||
+              finalSorted.first.value - finalSorted[1].value >= 0.25)) {
+        print('   ✅ Confirmed after rotation: ${finalSorted.first.key}');
+        return finalSorted.first.key;
+      }
     }
 
-    final finalSorted = results.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    if (_debugOcr) print('FINAL Template scores: $finalSorted');
-
-    if (finalSorted.first.value >= 0.85 &&
-        (finalSorted.length == 1 ||
-            finalSorted.first.value - finalSorted[1].value >= 0.18)) {
-      return finalSorted.first.key;
+    // إذا لم نتأكد بنسبة كافية، نطبق قواعد منطقية للأرقام الملتبسة
+    if (first.value < 0.90 || (second != null && first.value - second.value < 0.15)) {
+      print('   ⚠️ Low confidence: ${first.key} (${first.value.toStringAsFixed(3)}) vs ${second?.key ?? "?"} (${second?.value.toStringAsFixed(3) ?? "N/A"})');
+      
+      // قواعد منطقية للأرقام الملتبسة الشائعة
+      final ambiguous = _resolveAmbiguousDigits(first.key, second?.key, first.value, second?.value ?? 0.0);
+      if (ambiguous != null) {
+        print('   🔧 Resolved ambiguity: $ambiguous');
+        return ambiguous;
+      }
     }
-    return '?';
+
+    print('   ✅ Best match: ${first.key} (score: ${first.value.toStringAsFixed(3)})');
+    return first.key;
+  }
+
+  // دالة لحل التباس الأرقام المتشابهة
+  String? _resolveAmbiguousDigits(String first, String? second, double firstScore, double secondScore) {
+    if (second == null) return first;
+    
+    // الفارق صغير جداً - نحتاج قواعد ذكية
+    final diff = firstScore - secondScore;
+    
+    // 6 vs 5: إذا كان الفارق صغير، نختار 6 (أكثر شيوعاً في البطاقات)
+    if ((first == '6' && second == '5') || (first == '5' && second == '6')) {
+      if (diff.abs() < 0.15) {
+        print('      📌 Ambiguous 5/6 detected - choosing 6 (more common in cards)');
+        return '6';
+      }
+    }
+    
+    // 9 vs 0: إذا كان الفارق صغير، نختار الأعلى score
+    if ((first == '9' && second == '0') || (first == '0' && second == '9')) {
+      if (diff.abs() < 0.12) {
+        print('      📌 Ambiguous 9/0 detected - choosing based on score');
+        return firstScore > secondScore ? first : second;
+      }
+    }
+    
+    // 3 vs 8: إذا كان الفارق صغير، نختار الأعلى score
+    if ((first == '3' && second == '8') || (first == '8' && second == '3')) {
+      if (diff.abs() < 0.15) {
+        print('      📌 Ambiguous 3/8 detected - choosing based on score');
+        return firstScore > secondScore ? first : second;
+      }
+    }
+    
+    // في حالة وجود فارق معقول، نختار الأعلى
+    if (diff >= 0.10) return first;
+    
+    return null; // غير قادر على الحسم
   }
 
   void correctDigitAmbiguity({
