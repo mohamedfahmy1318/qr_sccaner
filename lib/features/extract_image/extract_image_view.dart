@@ -16,8 +16,11 @@ class ExtractImageView extends StatelessWidget {
 
   const ExtractImageView({super.key, this.scanType});
 
-  Future<bool> saveFile(String url, String fileName,
-      Function(int value, int total) onReceiveProgress) async {
+  Future<bool> saveFile(
+    String url,
+    String fileName,
+    Function(int value, int total) onReceiveProgress,
+  ) async {
     try {
       if (await _requestPermission(Permission.storage)) {
         Directory? directory;
@@ -41,8 +44,11 @@ class ExtractImageView extends StatelessWidget {
           await directory.create(recursive: true);
         }
         if (await directory.exists()) {
-          await Dio().download(url, saveFile.path,
-              onReceiveProgress: onReceiveProgress);
+          await Dio().download(
+            url,
+            saveFile.path,
+            onReceiveProgress: onReceiveProgress,
+          );
         }
       }
       return true;
@@ -70,217 +76,231 @@ class ExtractImageView extends StatelessWidget {
     return BlocProvider(
       create: (context) => ExtractImageController(scanType),
       child: BlocBuilder<ExtractImageController, ExtractImageStates>(
-          builder: (context, state) {
-        return Scaffold(
-          body: Container(
-            decoration: containerDecoration,
-            child: ListView(
-              children: [
-                const CustomAppBar(
-                  text: 'Saved Data',
-                ),
-                Container(
-                  height: MediaQuery.of(context).size.height,
-                  padding: EdgeInsets.only(
+        builder: (context, state) {
+          return Scaffold(
+            body: Container(
+              decoration: containerDecoration,
+              child: ListView(
+                children: [
+                  const CustomAppBar(text: 'Saved Data'),
+                  Container(
+                    height: MediaQuery.of(context).size.height,
+                    padding: EdgeInsets.only(
                       top: MediaQuery.of(context).size.height * 0.06,
                       left: 20,
-                      right: 20),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.only(
-                      topRight: Radius.circular(20),
-                      topLeft: Radius.circular(20),
+                      right: 20,
+                    ),
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.only(
+                        topRight: Radius.circular(20),
+                        topLeft: Radius.circular(20),
+                      ),
+                    ),
+                    child: ListView(
+                      children: [
+                        Container(
+                          width: MediaQuery.of(context).size.width,
+                          height: MediaQuery.of(context).size.height * 0.28,
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: Colors.blueAccent,
+                              width: 1.0,
+                            ),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child:
+                              BlocBuilder<
+                                ExtractImageController,
+                                ExtractImageStates
+                              >(
+                                builder: (context, state) {
+                                  final controller = ExtractImageController.of(
+                                    context,
+                                  );
+                                  final previewFile =
+                                      controller.scanImage ?? controller.image;
+
+                                  if (previewFile != null) {
+                                    return Image.file(previewFile);
+                                  }
+
+                                  return SizedBox(
+                                    height: 50,
+                                    width: 40,
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(50),
+                                      child: Image.asset(
+                                        'assets/images/screenshot.png',
+                                        fit: BoxFit.contain,
+                                        height: 50,
+                                        width: 50,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                        ),
+                        const SizedBox(height: 30.0),
+                        Container(
+                          width: 100,
+                          decoration: BoxDecoration(
+                            color: const Color(0xff869FD8),
+                            borderRadius: BorderRadius.circular(5.0),
+                          ),
+                          padding: const EdgeInsets.all(16.0),
+                          child: InkWell(
+                            onTap: () {
+                              // CardScanOptions scanOptions = const CardScanOptions(
+                              //   scanCardHolderName: true,
+                              //   // enableDebugLogs: true,
+                              //   validCardsToScanBeforeFinishingScan: 5,
+                              //   possibleCardHolderNamePositions: [
+                              //     CardHolderNameScanPosition.aboveCardNumber,
+                              //   ],
+                              // );
+                              // final CardDetails? cardDetails = await CardScanner.scanCard(scanOptions: scanOptions);
+                              // print('daddadadad'+ cardDetails.toString());
+                              ExtractImageController.of(
+                                context,
+                              ).getImage(context);
+                            },
+                            child: const SizedBox(
+                              width: 10.0,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.camera_alt, color: Colors.white),
+                                  SizedBox(width: 10.0),
+                                  Text(
+                                    'Camera',
+                                    style: TextStyle(color: Colors.white),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 15.0),
+                        Container(
+                          padding: const EdgeInsets.all(16.0),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey, width: 1.0),
+                            borderRadius: BorderRadius.circular(5.0),
+                          ),
+                          child: Row(
+                            children: [
+                              const Text('Pin No'),
+                              const SizedBox(width: 30.0),
+                              BlocBuilder<
+                                ExtractImageController,
+                                ExtractImageStates
+                              >(
+                                buildWhen: (context, state) =>
+                                    state is ScanPinSuccess,
+                                builder: (context, state) => Text(
+                                  ExtractImageController.of(context).pin.text,
+                                  style: const TextStyle(color: Colors.grey),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 30.0),
+                        Container(
+                          padding: const EdgeInsets.all(16.0),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey, width: 1.0),
+                            borderRadius: BorderRadius.circular(5.0),
+                          ),
+                          child: Row(
+                            children: [
+                              const Text('Serial'),
+                              const SizedBox(width: 30.0),
+                              BlocBuilder<
+                                ExtractImageController,
+                                ExtractImageStates
+                              >(
+                                buildWhen: (context, state) =>
+                                    state is ScanPinSuccess,
+                                builder: (context, state) => Text(
+                                  ExtractImageController.of(
+                                    context,
+                                  ).serial.text,
+                                  style: const TextStyle(color: Colors.grey),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 30.0),
+                        BlocBuilder<ExtractImageController, ExtractImageStates>(
+                          builder: (context, state) => state is ScanLoading
+                              ? SizedBox(
+                                  height: 35,
+                                  width: 35,
+                                  child: Center(
+                                    child: CircularProgressIndicator(
+                                      color: colorPrimary,
+                                    ),
+                                  ),
+                                )
+                              : CustomButton(
+                                  text: 'Save',
+                                  onPress: () async {
+                                    final controller = context
+                                        .read<ExtractImageController>();
+                                    final messenger = ScaffoldMessenger.of(
+                                      context,
+                                    );
+
+                                    if (controller.image == null) {
+                                      messenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Please capture a card image first.',
+                                          ),
+                                        ),
+                                      );
+                                      return;
+                                    }
+
+                                    await controller.scan();
+
+                                    final fileName =
+                                        controller.serial.text.isNotEmpty
+                                        ? controller.serial.text
+                                        : 'scan_${DateTime.now().millisecondsSinceEpoch}';
+
+                                    final saved = await saveFile(
+                                      controller.image!.path,
+                                      fileName,
+                                      (value, total) {},
+                                    );
+
+                                    if (!saved) {
+                                      messenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Unable to save the image.',
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                ),
+                        ),
+                        const SizedBox(height: 60.0),
+                        const Center(child: Text('Nomber of Card is 700')),
+                      ],
                     ),
                   ),
-                  child: ListView(
-                    children: [
-                      Container(
-                        width: MediaQuery.of(context).size.width,
-                        height: MediaQuery.of(context).size.height * 0.28,
-                        decoration: BoxDecoration(
-                          border:
-                              Border.all(color: Colors.blueAccent, width: 1.0),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: ExtractImageController.of(context).image != null
-                            ? Image.file(
-                                ExtractImageController.of(context).image!)
-                            : SizedBox(
-                                height: 50,
-                                width: 40,
-                                child: Padding(
-                                  padding: const EdgeInsets.all(50),
-                                  child: Image.asset(
-                                      'assets/images/screenshot.png',
-                                      fit: BoxFit.contain,
-                                      height: 50,
-                                      width: 50),
-                                )),
-                      ),
-                      const SizedBox(
-                        height: 30.0,
-                      ),
-                      Container(
-                        width: 100,
-                        decoration: BoxDecoration(
-                          color: const Color(0xff869FD8),
-                          borderRadius: BorderRadius.circular(5.0),
-                        ),
-                        padding: const EdgeInsets.all(16.0),
-                        child: InkWell(
-                          onTap: () {
-                            // CardScanOptions scanOptions = const CardScanOptions(
-                            //   scanCardHolderName: true,
-                            //   // enableDebugLogs: true,
-                            //   validCardsToScanBeforeFinishingScan: 5,
-                            //   possibleCardHolderNamePositions: [
-                            //     CardHolderNameScanPosition.aboveCardNumber,
-                            //   ],
-                            // );
-                            // final CardDetails? cardDetails = await CardScanner.scanCard(scanOptions: scanOptions);
-                            // print('daddadadad'+ cardDetails.toString());
-                            ExtractImageController.of(context).getImage();
-                          },
-                          child: const SizedBox(
-                            width: 10.0,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  Icons.camera_alt,
-                                  color: Colors.white,
-                                ),
-                                SizedBox(
-                                  width: 10.0,
-                                ),
-                                Text(
-                                  'Camera',
-                                  style: TextStyle(color: Colors.white),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(
-                        height: 15.0,
-                      ),
-                      Container(
-                        padding: const EdgeInsets.all(16.0),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey, width: 1.0),
-                          borderRadius: BorderRadius.circular(
-                            5.0,
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            const Text('Pin No'),
-                            const SizedBox(
-                              width: 30.0,
-                            ),
-                            BlocBuilder<ExtractImageController,
-                                ExtractImageStates>(
-                              buildWhen: (context, state) =>
-                                  state is ScanPinSuccess,
-                              builder: (context, state) => Text(
-                                ExtractImageController.of(context).pin.text,
-                                style: const TextStyle(color: Colors.grey),
-                              ),
-                            )
-                          ],
-                        ),
-                      ),
-                      const SizedBox(
-                        height: 30.0,
-                      ),
-                      Container(
-                        padding: const EdgeInsets.all(16.0),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey, width: 1.0),
-                          borderRadius: BorderRadius.circular(
-                            5.0,
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            const Text('Serial'),
-                            const SizedBox(
-                              width: 30.0,
-                            ),
-                            BlocBuilder<ExtractImageController,
-                                ExtractImageStates>(
-                              buildWhen: (context, state) =>
-                                  state is ScanPinSuccess,
-                              builder: (context, state) => Text(
-                                ExtractImageController.of(context).serial.text,
-                                style: const TextStyle(color: Colors.grey),
-                              ),
-                            )
-                          ],
-                        ),
-                      ),
-                      const SizedBox(
-                        height: 30.0,
-                      ),
-                      BlocBuilder<ExtractImageController, ExtractImageStates>(
-                        builder: (context, state) => state is ScanLoading
-                            ? SizedBox(
-                                height: 35,
-                                width: 35,
-                                child: Center(
-                                  child: CircularProgressIndicator(
-                                    color: colorPrimary,
-                                  ),
-                                ),
-                            )
-                            : CustomButton(
-                                text: 'Save',
-                                onPress: () async {
-                                  final controller =
-                                      context.read<ExtractImageController>();
-                                  final messenger =
-                                      ScaffoldMessenger.of(context);
-
-                                  if (controller.image == null) {
-                                    messenger.showSnackBar(const SnackBar(
-                                      content: Text(
-                                          'Please capture a card image first.'),
-                                    ));
-                                    return;
-                                  }
-
-                                  await controller.scan();
-
-                                  final fileName = controller.serial.text.isNotEmpty
-                                      ? controller.serial.text
-                                      : 'scan_${DateTime.now().millisecondsSinceEpoch}';
-
-                                  final saved = await saveFile(
-                                    controller.image!.path,
-                                    fileName,
-                                    (value, total) {},
-                                  );
-
-                                  if (!saved) {
-                                    messenger.showSnackBar(const SnackBar(
-                                      content: Text('Unable to save the image.'),
-                                    ));
-                                  }
-                                }),
-                      ),
-                      const SizedBox(
-                        height: 60.0,
-                      ),
-                      const Center(child: Text('Nomber of Card is 700'))
-                    ],
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        );
-      }),
+          );
+        },
+      ),
     );
   }
 }
