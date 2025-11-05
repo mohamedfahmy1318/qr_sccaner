@@ -4,14 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:qrscanner/common_component/snack_bar.dart';
 import 'package:qrscanner/core/dioHelper/dio_helper.dart';
+import 'package:qrscanner/features/extract_image/card_camera_page.dart';
 import 'package:qrscanner/features/extract_image/extact_image_states.dart';
 import '../../core/appStorage/scan_model.dart';
 import 'package:image/image.dart' as img;
-import 'package:cunning_document_scanner/cunning_document_scanner.dart';
 
 class ExtractImageController extends Cubit<ExtractImageStates> {
   ExtractImageController(this.scanType) : super(ExtractInitial());
@@ -31,26 +30,15 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   File? image;
   File? scanImage;
 
-  // ============== Document Scanner مع مربع التحديد ==============
+  // ============== Custom Camera مع مربع التحديد ==============
   Future<void> getImage(BuildContext context) async {
     try {
-      // طلب إذن الكاميرا
-      final cameraStatus = await Permission.camera.request();
-      if (!cameraStatus.isGranted) {
-        showSnackBar('يرجى السماح باستخدام الكاميرا', color: Colors.red);
-        emit(ImagePickedError());
-        return;
-      }
+      print('📸 Opening custom camera...');
 
-      print('📸 Opening document scanner...');
+      // استخدام الكاميرا المخصصة
+      final capturedImage = await CardCameraPage.capture(context);
 
-      // استخدام cunning_document_scanner
-      final capturedPaths = await CunningDocumentScanner.getPictures(
-        noOfPages: 1,
-        isGalleryImportAllowed: false,
-      );
-
-      if (capturedPaths == null || capturedPaths.isEmpty) {
+      if (capturedImage == null) {
         print('❌ User cancelled capture');
         textScanned = false;
         image = null;
@@ -59,10 +47,9 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         return;
       }
 
-      final capturedPath = capturedPaths.first;
-      print('✅ Captured image: $capturedPath');
+      print('✅ Captured image: ${capturedImage.path}');
 
-      final sourceFile = File(capturedPath);
+      final sourceFile = File(capturedImage.path);
       if (!await sourceFile.exists()) {
         print('❌ Captured file not found');
         showSnackBar('فشل في حفظ الصورة', color: Colors.red);
@@ -91,43 +78,50 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
       pin.clear();
       serial.clear();
 
+      // مسح المرشحين السابقين
+      pinCandidates.clear();
+      serialCandidates.clear();
+
       print('✅ Image saved: $safePath');
 
-      // إنشاء النسخة المحسّنة أولاً ثم استخدامها في القراءة
-      final enhancedPath = await enhanceImageForOCR(safePath, threshold: 150);
-      final enhancedFile = File(enhancedPath);
-      final hasEnhancedFile =
-          enhancedPath != safePath && enhancedFile.existsSync();
-
-      scanImage = hasEnhancedFile ? enhancedFile : image;
+      // عرض الصورة الأصلية بالألوان للمستخدم
+      scanImage = image;
       emit(ImagePickedSuccess());
 
-      final primaryPath = hasEnhancedFile ? enhancedPath : safePath;
-      final recognized = await getText(primaryPath, emitScanning: true);
+      // محاولات متعددة لاستخراج الأرقام بدقة عالية
+      print('🔍 Starting OCR with multiple enhancements...');
 
-      if (_needsEnhancedPass(recognized)) {
-        bool secondaryRecognized = recognized;
+      // محاولة 1: تحسين خفيف
+      final enhanced1 = await enhanceImageForOCR(safePath, threshold: 130);
+      await getText(enhanced1, emitScanning: true);
 
-        if (hasEnhancedFile) {
-          secondaryRecognized = await getText(safePath, emitScanning: false);
-        }
+      // محاولة 2: الصورة الأصلية
+      print('🔁 Trying original image...');
+      await getText(safePath, emitScanning: false);
 
-        if (_needsEnhancedPass(secondaryRecognized)) {
-          final softerPath = await enhanceImageForOCR(safePath, threshold: 135);
-          final softerFile = File(softerPath);
-          if (softerFile.existsSync() && softerPath != primaryPath) {
-            scanImage = softerFile;
-            emit(ImagePickedSuccess());
-            await getText(softerPath, emitScanning: false);
-          }
-        }
+      // محاولة 3: تحسين متوسط
+      print('� Trying medium enhancement...');
+      final enhanced2 = await enhanceImageForOCR(safePath, threshold: 150);
+      if (enhanced2 != enhanced1) {
+        await getText(enhanced2, emitScanning: false);
       }
-    } catch (e) {
+
+      // محاولة 4: تحسين عالي
+      print('🔁 Trying high enhancement...');
+      final enhanced3 = await enhanceImageForOCR(safePath, threshold: 170);
+      if (enhanced3 != enhanced1 && enhanced3 != enhanced2) {
+        await getText(enhanced3, emitScanning: false);
+      }
+
+      // اختيار أفضل نتيجة من جميع المحاولات
+      _selectBestResults();
+    } catch (e, stackTrace) {
       print('❌ Error in getImage: $e');
+      print('Stack trace: $stackTrace');
       textScanned = false;
       image = null;
       scanImage = null;
-      showSnackBar('خطأ في تصوير الكارت. حاول مرة أخرى', color: Colors.red);
+      showSnackBar('خطأ في تصوير الكارت: $e', color: Colors.red);
       emit(ImagePickedError());
     }
   }
@@ -139,9 +133,9 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
   // تحسين الصورة لدقة أعلى في OCR (Contrast + Brightness + Grayscale)
   Future<String> enhanceImageForOCR(
     String imagePath, {
-    int threshold = 150,
+    int threshold = 140,
   }) async {
-    print('Enhancing image for better OCR...');
+    print('Enhancing image for OCR with threshold: $threshold...');
 
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -152,7 +146,7 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
         sourcePath: imagePath,
         outputPath: enhancedPath,
         threshold: threshold,
-        maxWidth: 1000,
+        maxWidth: 1600, // زيادة الدقة لتحسين قراءة الأرقام
       );
 
       final resultPath = await compute(_enhanceImageInIsolate, request);
@@ -172,7 +166,42 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
 
   // تنظيف النص من كل شيء ما عدا الأرقام
   String cleanText(String text) {
-    return text.replaceAll(RegExp(r'[^0-9]'), '');
+    final normalized = _normalizeDigitLookalikes(text);
+    return normalized.replaceAll(RegExp(r'[^0-9]'), '');
+  }
+
+  String _normalizeDigitLookalikes(String input) {
+    final buffer = StringBuffer();
+    for (final char in input.split('')) {
+      switch (char) {
+        case 'O':
+        case 'o':
+          buffer.write('0');
+          break;
+        case 'S':
+        case 's':
+          buffer.write('5');
+          break;
+        case 'G':
+        case 'g':
+          buffer.write('6');
+          break;
+        case 'B':
+          buffer.write('8');
+          break;
+        case 'I':
+        case 'l':
+          buffer.write('1');
+          break;
+        case 'Z':
+        case 'z':
+          buffer.write('2');
+          break;
+        default:
+          buffer.write(char);
+      }
+    }
+    return buffer.toString();
   }
 
   // استخراج كل الأرقام المحتملة من النص (محسّن للسرعة)
@@ -180,16 +209,47 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     Set<String> numbers = {}; // استخدام Set لتجنب التكرار مباشرة
 
     for (var block in blocks) {
+      final blockText = block.text.toUpperCase();
+
+      // تجاهل أي Block يحتوي على كلمة VAT أو TAX
+      if (blockText.contains('VAT') ||
+          blockText.contains('TAX') ||
+          blockText.contains('TAXNO') ||
+          blockText.contains('ضريب')) {
+        print('⚠️ Skipping VAT/TAX block: ${block.text}');
+        continue;
+      }
+
       final cleaned = cleanText(block.text);
       if (cleaned.length >= 10) {
-        numbers.add(cleaned);
+        // تجاهل الأرقام التي تبدأ بـ 300 (VAT)
+        if (!cleaned.startsWith('300')) {
+          numbers.add(cleaned);
+        } else {
+          print('⚠️ Skipping VAT number from block: $cleaned');
+        }
       }
 
       // استخراج من Lines فقط (أسرع)
       for (var line in block.lines) {
+        final lineText = line.text.toUpperCase();
+
+        // تجاهل السطر إذا كان يحتوي على VAT
+        if (lineText.contains('VAT') ||
+            lineText.contains('TAX') ||
+            lineText.contains('ضريب')) {
+          print('⚠️ Skipping VAT/TAX line: ${line.text}');
+          continue;
+        }
+
         final cleanedLine = cleanText(line.text);
         if (cleanedLine.length >= 10) {
-          numbers.add(cleanedLine);
+          // تجاهل الأرقام التي تبدأ بـ 300
+          if (!cleanedLine.startsWith('300')) {
+            numbers.add(cleanedLine);
+          } else {
+            print('⚠️ Skipping VAT number from line: $cleanedLine');
+          }
         }
       }
     }
@@ -197,39 +257,105 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     return numbers.toList();
   }
 
+  // تخزين المرشحين لاختيار الأفضل
+  Map<String, int> pinCandidates = {};
+  Map<String, int> serialCandidates = {};
+
   // البحث عن PIN (14 رقم تحديداً) - محسّن وأسرع
   String? findPIN(List<String> candidates) {
-    // فلترة سريعة: استبعاد VAT (300), Service (142, 141)
+    // فلترة قوية: استبعاد VAT (300) فقط
     final filtered = candidates.where((c) {
       if (c.length < 13 || c.length > 18) return false;
-      if (c.startsWith('300') || c.startsWith('142') || c.startsWith('141')) {
+
+      // استبعاد الرقم الضريبي: يبدأ بـ 300 فقط
+      if (c.startsWith('300')) {
+        print('❌ Ignored VAT number: $c');
         return false;
       }
+      if (c.startsWith('3') && c.length == 15) {
+        print('❌ Ignored potential VAT (15 digits starting with 3): $c');
+        return false;
+      }
+
       return true;
     }).toList();
 
+    // البحث عن PIN صحيح بطول 14 رقم تحديداً
     for (final value in filtered) {
       if (value.length == 14) {
-        return value;
+        return _formatPIN(value);
       }
     }
 
     for (final value in filtered) {
       if (value.length > 14) {
-        return value.substring(0, 14);
+        return _formatPIN(value.substring(0, 14));
       }
     }
 
     for (final value in filtered) {
       if (value.length == 13) {
-        return '${value}0';
+        return _formatPIN('0$value');
       }
     }
 
     return null;
   }
 
-  // البحث عن Serial (11-13 رقم) - محسّن
+  // تنسيق رقم الـ PIN بصيغة: 0621 814 1091 663
+  String _formatPIN(String pin) {
+    if (pin.length != 14) return pin;
+
+    // تقسيم الرقم: 4 أرقام، 3 أرقام، 4 أرقام، 3 أرقام
+    return '${pin.substring(0, 4)} ${pin.substring(4, 7)} ${pin.substring(7, 11)} ${pin.substring(11, 14)}';
+  }
+
+  // اختيار أفضل نتيجة من جميع المحاولات
+  void _selectBestResults() {
+    print(
+      '📊 Selecting best results from ${pinCandidates.length} PIN candidates and ${serialCandidates.length} serial candidates',
+    );
+
+    // اختيار الـ PIN الأكثر تكراراً
+    if (pinCandidates.isNotEmpty) {
+      var bestPin = pinCandidates.entries.reduce(
+        (a, b) => a.value > b.value ? a : b,
+      );
+
+      // إذا كانت هناك مرشحات متساوية، اختر الذي يبدأ بـ 6 أو 0
+      var topCandidates = pinCandidates.entries
+          .where((e) => e.value == bestPin.value)
+          .toList();
+      if (topCandidates.length > 1) {
+        // فضّل الأرقام التي تبدأ بـ 6 أو 0
+        var preferredStarts = topCandidates.where((e) {
+          final cleanPin = e.key.replaceAll(' ', '');
+          return cleanPin.startsWith('6') || cleanPin.startsWith('0');
+        }).toList();
+        if (preferredStarts.isNotEmpty) {
+          bestPin = preferredStarts.first;
+        }
+      }
+
+      pin.text = bestPin.key;
+      print('🏆 Best PIN (${bestPin.value} votes): ${pin.text}');
+    }
+
+    // اختيار الـ Serial الأكثر تكراراً
+    if (serialCandidates.isNotEmpty) {
+      var bestSerial = serialCandidates.entries.reduce(
+        (a, b) => a.value > b.value ? a : b,
+      );
+      serial.text = bestSerial.key;
+      print('🏆 Best Serial (${bestSerial.value} votes): ${serial.text}');
+    }
+
+    // عرض النتيجة النهائية
+    if (pin.text.isNotEmpty || serial.text.isNotEmpty) {
+      emit(ScanPinSuccess());
+    }
+  } // البحث عن Serial (11-13 رقم) - محسّن
+
   String? findSerial(List<String> candidates, String? excludePin) {
     const invalidPrefixes = ['300', '142', '141'];
 
@@ -275,7 +401,16 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     );
 
     // استخراج الأرقام بسرعة
-    List<String> allNumbers = extractAllNumbers(recognizedText.blocks);
+    final initialNumbers = extractAllNumbers(recognizedText.blocks);
+    final Set<String> uniqueNumbers = initialNumbers.toSet();
+
+    final normalizedFullText = _normalizeDigitLookalikes(recognizedText.text);
+    final digitRuns = RegExp(r'\d{11,16}').allMatches(normalizedFullText);
+    for (final match in digitRuns) {
+      uniqueNumbers.add(match.group(0)!);
+    }
+
+    final List<String> allNumbers = uniqueNumbers.toList();
 
     // ترتيب حسب الطول (الأطول أولاً)
     allNumbers.sort((a, b) => b.length.compareTo(a.length));
@@ -288,28 +423,26 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
 
     bool hasResult = false;
 
+    // تخزين النتائج في المرشحين بدلاً من استبدالها مباشرة
     if (detectedPin != null) {
-      if (pin.text != detectedPin) {
-        pin.text = detectedPin;
-        print('✅ PIN: ${pin.text}');
-      }
+      pinCandidates[detectedPin] = (pinCandidates[detectedPin] ?? 0) + 1;
+      print(
+        '✅ PIN candidate: $detectedPin (${pinCandidates[detectedPin]} votes)',
+      );
       hasResult = true;
     }
 
     if (detectedSerial != null) {
-      if (serial.text != detectedSerial) {
-        serial.text = detectedSerial;
-        print('✅ Serial: ${serial.text}');
-      }
+      serialCandidates[detectedSerial] =
+          (serialCandidates[detectedSerial] ?? 0) + 1;
+      print(
+        '✅ Serial candidate: $detectedSerial (${serialCandidates[detectedSerial]} votes)',
+      );
       hasResult = true;
     }
 
-    if (pin.text.isNotEmpty || serial.text.isNotEmpty) {
-      emit(ScanPinSuccess());
-    }
-
     textScanned = false;
-    return hasResult || pin.text.isNotEmpty || serial.text.isNotEmpty;
+    return hasResult;
   }
 
   ScanModel? scanModel;
@@ -352,29 +485,6 @@ class ExtractImageController extends Cubit<ExtractImageStates> {
     await _textRecognizer.close();
     await super.close();
   }
-
-  bool _needsEnhancedPass(bool recognized) {
-    if (!recognized) {
-      return true;
-    }
-
-    final pinValue = pin.text;
-    final serialValue = serial.text;
-
-    final hasValidPin = pinValue.length == 14 && _isNumeric(pinValue);
-    final hasValidSerial =
-        serialValue.length >= 11 &&
-        serialValue.length <= 13 &&
-        _isNumeric(serialValue);
-
-    if (!hasValidPin || !hasValidSerial) {
-      return true;
-    }
-
-    return false;
-  }
-
-  bool _isNumeric(String value) => RegExp(r'^\d+$').hasMatch(value);
 }
 
 class _EnhancementRequest {
@@ -404,36 +514,56 @@ String _enhanceImageInIsolate(_EnhancementRequest request) {
       return request.sourcePath;
     }
 
-    img.Image grayscale = img.grayscale(decoded);
+    img.Image processed = img.grayscale(decoded);
 
-    if (grayscale.width > request.maxWidth) {
+    // تكبير الصورة للحفاظ على التفاصيل
+    if (processed.width > request.maxWidth) {
       final resizedHeight =
-          (grayscale.height * request.maxWidth / grayscale.width).round();
-      grayscale = img.copyResize(
-        grayscale,
+          (processed.height * request.maxWidth / processed.width).round();
+      processed = img.copyResize(
+        processed,
         width: request.maxWidth,
         height: resizedHeight,
-        interpolation: img.Interpolation.average,
+        interpolation: img.Interpolation.cubic,
       );
     }
 
-    img.Image boosted = img.adjustColor(
-      grayscale,
-      contrast: 1.3,
-      brightness: 1.05,
-    );
+    // تطبيع السطوع (Histogram Equalization)
+    final bytes = processed.getBytes();
+    int minLuminance = 255;
+    int maxLuminance = 0;
 
-    final thresholdValue = request.threshold.clamp(60, 220).toInt();
-    for (int y = 0; y < boosted.height; y++) {
-      for (int x = 0; x < boosted.width; x++) {
-        final pixel = boosted.getPixel(x, y);
-        final luminance = pixel.r;
-        final value = luminance > thresholdValue ? 255 : 0;
-        boosted.setPixelRgba(x, y, value, value, value, 255);
+    for (int i = 0; i < bytes.length; i += 4) {
+      final luminance = bytes[i];
+      if (luminance < minLuminance) minLuminance = luminance;
+      if (luminance > maxLuminance) maxLuminance = luminance;
+    }
+
+    if (maxLuminance > minLuminance) {
+      final double scale = 255.0 / (maxLuminance - minLuminance);
+      for (int i = 0; i < bytes.length; i += 4) {
+        int luminance = bytes[i];
+        luminance = ((luminance - minLuminance) * scale).clamp(0, 255).round();
+        bytes[i] = luminance;
+        bytes[i + 1] = luminance;
+        bytes[i + 2] = luminance;
+        bytes[i + 3] = 255;
       }
     }
 
-    final enhancedBytes = img.encodeJpg(boosted, quality: 85);
+    // تطبيق contrast و brightness بناءً على الـ threshold
+    final double contrastBoost = (request.threshold / 120.0).clamp(1.4, 2.2);
+    final double brightnessBoost =
+        1.12 + ((request.threshold - 140).clamp(-50, 50) / 220.0);
+
+    processed = img.adjustColor(
+      processed,
+      contrast: contrastBoost,
+      brightness: brightnessBoost,
+      saturation: 0.0, // إزالة الألوان تماماً للتركيز على التباين
+    );
+
+    final enhancedBytes = img.encodeJpg(processed, quality: 98);
     File(request.outputPath).writeAsBytesSync(enhancedBytes, flush: true);
 
     return request.outputPath;
